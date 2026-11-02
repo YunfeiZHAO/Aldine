@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useImperativeHandle, forwardRef, useRef, useState } from 'react';
+import { useCallback, useEffect, useImperativeHandle, useLayoutEffect, forwardRef, useRef, useState } from 'react';
 import { useShortcutLabel } from '../util/shortcuts';
 import { pagesOnScreen, scrollTopForPage, type PdfPagesStore } from '../util/pdfPages';
 import { cMapUrl, pdfjs } from '../util/pdfjs';
+import { citeEntry, renderCitePreview } from '../editor/latexExtras';
 
 export interface PdfPaneHandle {
   /** Scroll to a page + PDF-space y and flash a highlight (forward SyncTeX). */
@@ -15,6 +16,9 @@ export interface PdfPaneHandle {
 
 interface Props {
   pdfUrl: string | null;
+  /** The project whose bibliography the cite popups read; with branch it keys
+   *  the bib index that citeEntry() looks keys up in. */
+  projectId: string;
   /** The branch whose PDF is shown; a change empties the pane (see below). */
   branch?: string;
   status: 'idle' | 'compiling' | 'ok' | 'error';
@@ -36,15 +40,78 @@ interface Props {
   pages?: PdfPagesStore;
 }
 
-const PdfPane = forwardRef<PdfPaneHandle, Props>(function PdfPane({ pdfUrl, branch, status, zoom = 1, hasErrors = false, stale = false, ready = true, hasTex = true, onFirstOpen, onInverse, pages }, ref) {
+const PdfPane = forwardRef<PdfPaneHandle, Props>(function PdfPane({ pdfUrl, projectId, branch, status, zoom = 1, hasErrors = false, stale = false, ready = true, hasTex = true, onFirstOpen, onInverse, pages }, ref) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const typesetKeys = useShortcutLabel('typeset');
   const innerRef = useRef<HTMLDivElement>(null);
   const [rendered, setRendered] = useState(false);
   const renderTask = useRef(0);
   const firstOpenFired = useRef(false);
-  // per-page viewport info for coordinate mapping
-  const pageInfo = useRef<Array<{ el: HTMLCanvasElement; scale: number; height: number }>>([]);
+  // per-page viewport info for coordinate mapping. `anno` is the cite-link
+  // overlay for the page (lazily built with the pixels, dropped when released).
+  const pageInfo = useRef<Array<{ el: HTMLCanvasElement; scale: number; height: number; anno?: HTMLDivElement | null }>>([]);
+
+  // Cite popup: shown on hover and pinned on click. projectId/branch are read
+  // through refs so the imperative hotspot handlers built inside the render
+  // effect (which doesn't depend on them) never look keys up in a stale index.
+  const projectIdRef = useRef(projectId);
+  projectIdRef.current = projectId;
+  const branchRef = useRef(branch);
+  branchRef.current = branch;
+  const popRef = useRef<HTMLDivElement | null>(null);
+  const popAnchor = useRef<HTMLElement | null>(null);
+  const popPinned = useRef(false);
+  const hoverTimer = useRef(0);
+
+  const hideCitePop = useCallback(() => {
+    popPinned.current = false;
+    popAnchor.current = null;
+    popRef.current?.remove();
+    popRef.current = null;
+  }, []);
+
+  // Lay the cite-link overlay exactly over its page canvas. Called after layout
+  // and on every zoom/width relayout so the hotspots (positioned in percent)
+  // track the canvas box the user actually sees.
+  const positionLayer = useCallback((it: { el: HTMLCanvasElement; anno?: HTMLDivElement | null }) => {
+    const layer = it.anno;
+    if (!layer) return;
+    layer.style.left = `${it.el.offsetLeft}px`;
+    layer.style.top = `${it.el.offsetTop}px`;
+    layer.style.width = `${it.el.clientWidth}px`;
+    layer.style.height = `${it.el.clientHeight}px`;
+  }, []);
+
+  const showCitePop = useCallback((anchor: HTMLElement, key: string, pinned: boolean) => {
+    const scroller = scrollRef.current, inner = innerRef.current;
+    if (!scroller || !inner) return;
+    const entry = citeEntry(projectIdRef.current, branchRef.current || 'main', key);
+    let pop = popRef.current;
+    // replaceChildren on a relayout detaches the popup; rebuild if it's gone.
+    if (!pop || !pop.isConnected) {
+      pop = document.createElement('div');
+      pop.className = 'pdf-cite-pop';
+      pop.setAttribute('data-testid', 'pdf-cite-pop');
+      inner.appendChild(pop);
+      popRef.current = pop;
+    }
+    pop.replaceChildren(renderCitePreview(entry, key));
+    popPinned.current = pinned;
+    popAnchor.current = anchor;
+    // Place above the hotspot, flipping below when it would clip the top of the
+    // scrolled view. Coordinates are relative to inner (the popup's offset
+    // parent), measured off the live rects so zoom/scroll never desync them.
+    pop.style.left = '0px';
+    pop.style.top = '0px';
+    const ar = anchor.getBoundingClientRect();
+    const ir = inner.getBoundingClientRect();
+    const left = ar.left - ir.left, top = ar.top - ir.top;
+    const x = Math.max(4, Math.min(left, inner.clientWidth - pop.offsetWidth - 4));
+    let y = top - pop.offsetHeight - 8;
+    if (y < scroller.scrollTop + 4) y = top + ar.height + 8;
+    pop.style.left = `${x}px`;
+    pop.style.top = `${y}px`;
+  }, []);
 
   useImperativeHandle(ref, () => ({
     showForward(page, y, h = 12) {
@@ -121,6 +188,10 @@ const PdfPane = forwardRef<PdfPaneHandle, Props>(function PdfPane({ pdfUrl, bran
       const w = Number(el.dataset.w), h = Number(el.dataset.h);
       if (w && h) { el.style.width = `${Math.floor(w * ratio)}px`; el.style.height = `${Math.floor(h * ratio)}px`; }
     }
+    // Canvases just changed size, so every overlay's box (and the offsetTop of
+    // later pages) moved — realign the cite layers so hotspots stay on target.
+    for (const it of pageInfo.current) positionLayer(it);
+    hideCitePop();
     measurePage();
     const t = setTimeout(() => setLayoutZoom(zoom), 150);
     return () => clearTimeout(t);
@@ -159,7 +230,10 @@ const PdfPane = forwardRef<PdfPaneHandle, Props>(function PdfPane({ pdfUrl, bran
     pageInfo.current = [];
     setRendered(false);
     pagesRef.current?.set(null);
-  }, [branch]);
+    hideCitePop();
+  }, [branch, hideCitePop]);
+
+  useEffect(() => () => window.clearTimeout(hoverTimer.current), []);
 
   useEffect(() => {
     if (!pdfUrl || !innerRef.current) return;
@@ -167,6 +241,9 @@ const PdfPane = forwardRef<PdfPaneHandle, Props>(function PdfPane({ pdfUrl, bran
     const container = innerRef.current;
     const scroller = scrollRef.current!;
     const prevScroll = scroller.scrollTop;
+    // This pass replaceChildren()s the pages, detaching any open popup; drop it
+    // so a stale pinned flag doesn't suppress hover after a relayout.
+    hideCitePop();
     let doc: Awaited<ReturnType<typeof pdfjs.getDocument>['promise']> | null = null;
     let observer: IntersectionObserver | null = null;
 
@@ -179,6 +256,43 @@ const PdfPane = forwardRef<PdfPaneHandle, Props>(function PdfPane({ pdfUrl, bran
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const states = new Map<number, 'blank' | 'rendering' | 'done'>();
     let chain: Promise<void> = Promise.resolve(); // serialize worker renders
+
+    // Turn a page's hyperref cite links into hover/click hotspots. hyperref
+    // names each bibliography anchor `cite.<bibkey>`, so a Link annotation whose
+    // named dest starts with `cite.` hands us the key directly — no number→key
+    // mapping, and it covers numeric [1], author-year, and natbib styles alike.
+    // Rects are percentages of the page box so the zoom live-stretch keeps them
+    // aligned without a rebuild; a document without hyperref simply has none.
+    const buildCiteLinks = async (page: Awaited<ReturnType<NonNullable<typeof doc>['getPage']>>, info: (typeof pageInfo.current)[number]) => {
+      const layer = info.anno;
+      if (!layer || layer.dataset.built) return;
+      let annos: Array<Record<string, unknown>>;
+      try { annos = await page.getAnnotations() as Array<Record<string, unknown>>; }
+      catch { return; }
+      if (my !== renderTask.current || info.anno !== layer) return;
+      const base = page.getViewport({ scale: 1 });
+      for (const a of annos) {
+        const dest = a.dest;
+        if (a.subtype !== 'Link' || typeof dest !== 'string' || !dest.startsWith('cite.')) continue;
+        const key = dest.slice('cite.'.length);
+        const r = a.rect as [number, number, number, number] | undefined;
+        if (!key || !r) continue;
+        // Annotation rects are PDF points, bottom-left origin; convert to a
+        // top-left box as a fraction of the page so CSS percentages place it.
+        const [x1, y1, x2, y2] = r;
+        const hot = document.createElement('a');
+        hot.className = 'pdf-cite-link';
+        hot.tabIndex = 0;
+        hot.dataset.citeKey = key;
+        hot.setAttribute('data-testid', `pdf-cite-link-${key}`);
+        hot.style.left = `${(Math.min(x1, x2) / base.width) * 100}%`;
+        hot.style.top = `${((base.height - Math.max(y1, y2)) / base.height) * 100}%`;
+        hot.style.width = `${(Math.abs(x2 - x1) / base.width) * 100}%`;
+        hot.style.height = `${(Math.abs(y2 - y1) / base.height) * 100}%`;
+        layer.appendChild(hot);
+      }
+      layer.dataset.built = '1';
+    };
 
     const rasterize = (i: number) => {
       if (states.get(i) === 'rendering' || states.get(i) === 'done') return;
@@ -198,6 +312,7 @@ const PdfPane = forwardRef<PdfPaneHandle, Props>(function PdfPane({ pdfUrl, bran
           cctx.scale(dpr, dpr);
           await page.render({ canvasContext: cctx, viewport }).promise;
           if (my === renderTask.current) states.set(i, 'done');
+          if (my === renderTask.current) await buildCiteLinks(page, info);
         } catch (err) {
           states.set(i, 'blank');
           if ((err as { name?: string })?.name !== 'RenderingCancelledException') console.error('[pdf] page render failed', err);
@@ -230,7 +345,7 @@ const PdfPane = forwardRef<PdfPaneHandle, Props>(function PdfPane({ pdfUrl, bran
         if (my !== renderTask.current) { try { doc.destroy(); } catch { /* noop */ } return; }
         const width = Math.max(320, scroller.clientWidth - 36) * layoutZoom;
         const frag = document.createDocumentFragment();
-        const info: Array<{ el: HTMLCanvasElement; scale: number; height: number }> = [];
+        const info: typeof pageInfo.current = [];
         for (let i = 1; i <= doc.numPages; i++) {
           const page = await doc.getPage(i);
           if (my !== renderTask.current) return;
@@ -244,14 +359,21 @@ const PdfPane = forwardRef<PdfPaneHandle, Props>(function PdfPane({ pdfUrl, bran
           canvas.style.width = `${canvas.dataset.w}px`;
           canvas.style.height = `${canvas.dataset.h}px`;
           canvas.style.background = '#fff';
+          // Cite-link hotspots live in a sibling overlay, not the canvas (a
+          // canvas has no children). It's positioned over the canvas box; its
+          // hotspots use percentages so a zoom stretch keeps them aligned.
+          const layer = document.createElement('div');
+          layer.className = 'pdf-cite-layer';
           frag.appendChild(canvas);
-          info.push({ el: canvas, scale, height: base.height });
+          frag.appendChild(layer);
+          info.push({ el: canvas, scale, height: base.height, anno: layer });
           states.set(i, 'blank');
         }
         if (my !== renderTask.current) return;
         container.replaceChildren(frag);
         pageInfo.current = info;
         scroller.scrollTop = prevScroll;
+        for (const it of info) positionLayer(it);
 
         // First visible page rasterizes before the spinner goes away — no
         // flash of blank paper on open.
@@ -283,7 +405,7 @@ const PdfPane = forwardRef<PdfPaneHandle, Props>(function PdfPane({ pdfUrl, bran
       observer?.disconnect();
       Promise.resolve(doc).then((d) => { try { d?.destroy(); } catch { /* already gone */ } });
     };
-  }, [pdfUrl, layoutZoom, widthTick, refitTick, measurePage]);
+  }, [pdfUrl, layoutZoom, widthTick, refitTick, measurePage, positionLayer, hideCitePop]);
 
   const handleDblClick = (e: React.MouseEvent) => {
     if (!onInverse) return;
@@ -300,12 +422,85 @@ const PdfPane = forwardRef<PdfPaneHandle, Props>(function PdfPane({ pdfUrl, bran
     onInverse(idx + 1, x, y);
   };
 
+  // Cite hotspots are created imperatively inside the render effect, so their
+  // hover/click is handled by delegation on the inner container rather than per
+  // element. Hover opens after a short delay (matching the source hover); click
+  // or keyboard focus pins it open until an outside click or Escape.
+  const citeOf = (e: React.SyntheticEvent) => (e.target as HTMLElement).closest<HTMLElement>('.pdf-cite-link');
+  const onCitePointerOver = (e: React.PointerEvent) => {
+    if (e.pointerType !== 'mouse') return; // touch uses click; hover would double-fire
+    const hot = citeOf(e);
+    if (!hot?.dataset.citeKey || popPinned.current) return;
+    window.clearTimeout(hoverTimer.current);
+    hoverTimer.current = window.setTimeout(() => showCitePop(hot, hot.dataset.citeKey!, false), 300);
+  };
+  const onCitePointerOut = (e: React.PointerEvent) => {
+    if (e.pointerType !== 'mouse') return;
+    const hot = citeOf(e);
+    if (!hot || popPinned.current) return;
+    // leaving for the popup itself shouldn't dismiss it
+    const to = e.relatedTarget as Node | null;
+    if (to && popRef.current?.contains(to)) return;
+    window.clearTimeout(hoverTimer.current);
+    hideCitePop();
+  };
+  const onCiteClick = (e: React.MouseEvent) => {
+    const hot = citeOf(e);
+    if (!hot?.dataset.citeKey) return;
+    e.preventDefault(); // it's an <a> with no href; don't let it scroll/navigate
+    window.clearTimeout(hoverTimer.current);
+    // Always (re)pin rather than toggle: a mouse click focuses the <a> first,
+    // and onCiteFocus already pins it — a toggle here would then close what the
+    // same gesture just opened. Outside-click / Escape are the way to dismiss.
+    showCitePop(hot, hot.dataset.citeKey, true);
+  };
+  const onCiteFocus = (e: React.FocusEvent) => {
+    const hot = citeOf(e);
+    if (hot?.dataset.citeKey) showCitePop(hot, hot.dataset.citeKey, true);
+  };
+
+  // Dismiss a pinned popup on an outside click or Escape (hover popups close on
+  // pointer-out). Scrolling the pane keeps the popup anchored via reposition.
+  useEffect(() => {
+    const onDown = (e: PointerEvent) => {
+      const t = e.target as Node;
+      if (popRef.current?.contains(t)) return;
+      if ((t as HTMLElement)?.closest?.('.pdf-cite-link')) return; // the click handler decides
+      hideCitePop();
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') hideCitePop(); };
+    window.addEventListener('pointerdown', onDown);
+    window.addEventListener('keydown', onKey);
+    return () => { window.removeEventListener('pointerdown', onDown); window.removeEventListener('keydown', onKey); };
+  }, [hideCitePop]);
+
+  // Keep a pinned popup glued to its hotspot while the pane scrolls.
+  useLayoutEffect(() => {
+    const scroller = scrollRef.current;
+    if (!scroller) return;
+    const onScroll = () => {
+      const a = popAnchor.current;
+      if (a?.isConnected && a.dataset.citeKey) showCitePop(a, a.dataset.citeKey, popPinned.current);
+    };
+    scroller.addEventListener('scroll', onScroll, { passive: true });
+    return () => scroller.removeEventListener('scroll', onScroll);
+  }, [showCitePop]);
+
   return (
     <div className="pdf-pane" ref={scrollRef} data-testid="pdf-pane">
       {stale && rendered && (
         <div className="pdf-stale" data-testid="pdf-stale">Preview is from the last successful typeset</div>
       )}
-      <div className="pdf-pane__inner" ref={innerRef} onDoubleClick={handleDblClick} title={onInverse ? 'Double-click to jump to source' : undefined} />
+      <div
+        className="pdf-pane__inner"
+        ref={innerRef}
+        onDoubleClick={handleDblClick}
+        onPointerOver={onCitePointerOver}
+        onPointerOut={onCitePointerOut}
+        onClick={onCiteClick}
+        onFocus={onCiteFocus}
+        title={onInverse ? 'Double-click to jump to source' : undefined}
+      />
       {!rendered && (
         <div className="pdf-empty">
           {status === 'compiling' ? (

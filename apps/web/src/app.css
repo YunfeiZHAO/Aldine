@@ -1231,6 +1231,31 @@ select.input { padding-right: 30px; text-overflow: ellipsis; }
 }
 @keyframes pdf-flash { 15% { opacity: 0.35; } 100% { opacity: 0; } }
 
+/* Cite-link hotspots sit in an absolutely-positioned overlay per page, laid
+   over the canvas box. The layer is transparent to pointers so double-click
+   (inverse SyncTeX) still reaches the canvas; only the hotspots catch events. */
+.pdf-cite-layer { position: absolute; pointer-events: none; z-index: 1; }
+.pdf-cite-link {
+  position: absolute;
+  pointer-events: auto;
+  cursor: pointer;
+  border-radius: 2px;
+  background: transparent;
+  transition: background 0.1s var(--ease);
+}
+@media (hover: hover) and (pointer: fine) { .pdf-cite-link:hover { background: var(--accent-soft); } }
+.pdf-cite-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.pdf-cite-pop {
+  position: absolute;
+  z-index: 5;
+  max-width: 320px;
+  background: var(--bg-panel);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-l);
+  box-shadow: var(--shadow-pop);
+  color: var(--text);
+}
+
 /* errors panel */
 .errors {
   border-top: 1px solid var(--hairline-strong);

@@ -1578,6 +1578,7 @@ export default function Editor() {
           <PdfPane
             ref={pdfRef}
             pdfUrl={compile.result?.pdfUrl || null}
+            projectId={id}
             branch={branch}
             status={compile.status}
             zoom={zoom}

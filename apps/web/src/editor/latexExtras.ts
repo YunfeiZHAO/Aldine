@@ -109,6 +109,39 @@ export function invalidateLabelCache(): void {
   labelCache = null;
 }
 
+/**
+ * The reference-preview DOM for a \cite key: title (the paper name) over
+ * `author · year · journal`, or a not-found note. Shared by the source-editor
+ * hover and the rendered-PDF cite popup so both look identical.
+ */
+export function renderCitePreview(entry: BibEntry | undefined, key: string): HTMLElement {
+  const dom = document.createElement('div');
+  dom.style.cssText = 'padding:8px 10px;max-width:320px;font-family:var(--font-ui);font-size:12px;line-height:1.5';
+  if (entry) {
+    const title = document.createElement('div');
+    title.style.cssText = 'font-weight:600;margin-bottom:2px';
+    title.textContent = entry.title || key;
+    const meta = document.createElement('div');
+    meta.style.cssText = 'color:var(--text-2)';
+    meta.textContent = [entry.author, entry.year, entry.journal].filter(Boolean).join(' · ');
+    dom.append(title, meta);
+  } else {
+    dom.style.color = 'var(--error)';
+    dom.textContent = `No bibliography entry for “${key}”`;
+  }
+  return dom;
+}
+
+/**
+ * Look up one \cite key for a preview. Returns whatever is cached now and kicks
+ * off a TTL-guarded refresh so the next lookup has current data — the same
+ * read-then-refresh the hover relies on, without blocking the first paint.
+ */
+export function citeEntry(projectId: string, branch: string, key: string): BibEntry | undefined {
+  void loadBib(projectId, branch);
+  return (bibCache?.entries || []).find((e) => e.key === key);
+}
+
 /** Hover a \cite{key} to see the reference it points to. */
 export function citeHoverTooltip(projectId: string, branch: string): Extension {
   return hoverTooltip((view, pos) => {
@@ -131,32 +164,14 @@ export function citeHoverTooltip(projectId: string, branch: string): Extension {
         acc += k.length + 1;
       }
       key = key.trim();
-      // Render from whatever is cached, but kick off a refresh when the entry
-      // is stale/missing — the next hover then has current data. (loadBib is
-      // TTL-guarded, so hovering repeatedly doesn't hammer the server.)
-      void loadBib(projectId, branch);
-      const entry = (bibCache?.entries || []).find((e) => e.key === key);
+      const entry = citeEntry(projectId, branch, key);
       const from = line.from + braceStart;
       return {
         pos: from,
         end: line.from + braceEnd,
         above: true,
         create() {
-          const dom = document.createElement('div');
-          dom.style.cssText = 'padding:8px 10px;max-width:320px;font-family:var(--font-ui);font-size:12px;line-height:1.5';
-          if (entry) {
-            const title = document.createElement('div');
-            title.style.cssText = 'font-weight:600;margin-bottom:2px';
-            title.textContent = entry.title || key;
-            const meta = document.createElement('div');
-            meta.style.cssText = 'color:var(--text-2)';
-            meta.textContent = [entry.author, entry.year, entry.journal].filter(Boolean).join(' · ');
-            dom.append(title, meta);
-          } else {
-            dom.style.color = 'var(--error)';
-            dom.textContent = `No bibliography entry for “${key}”`;
-          }
-          return { dom };
+          return { dom: renderCitePreview(entry, key) };
         },
       };
     }

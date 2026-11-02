@@ -7,6 +7,14 @@ What 1.0 changes about that is in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## [Unreleased]
 
+### Added
+- Citation numbers in the typeset preview show the reference they point to:
+  hover one for a preview of its title, author, year and journal, or click to
+  pin it open (Escape or a click away closes it). It reads the same
+  bibliography index as the editor's `\cite` hover, and works for numeric,
+  author–year and natbib styles. Documents that load `hyperref` get the links;
+  without it the preview has nothing to attach to and nothing changes.
+
 ## [1.3.1] — 2026-10-29
 
 ### Fixed
