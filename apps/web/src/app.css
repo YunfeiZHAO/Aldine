@@ -962,15 +962,11 @@ select.input { padding-right: 30px; text-overflow: ellipsis; }
 .pdf-page { background: #fff; border-radius: 0; box-shadow: 0 0 0 1px var(--hairline), var(--shadow-card); }
 :root[data-theme="dark"] .pdf-page {
   background: var(--bg-panel);
+  filter: invert(0.92) hue-rotate(180deg);
 }
-/* In dark mode the rendered pages follow the app theme: invert turns the white
-   paper dark and the black text light, and the 180° hue-rotate puts coloured
-   text, links and figures back near their true hue (invert alone would make
-   blue cyan, red teal). This is a paint-only filter — it never reads back into
-   the canvas, so SyncTeX offsets and the cite-link overlay geometry (which are
-   measured off the canvas box) are untouched. */
-:root[data-theme="dark"] .pdf-page,
-:root[data-theme="dark"] .file-preview__page { filter: invert(0.92) hue-rotate(180deg); }
+:root[data-theme="dark"] .file-preview__page {
+  filter: invert(0.92) hue-rotate(180deg);
+}
 
 /* A project file the code editor cannot show (FilePreview), in its place. */
 .file-preview { flex: 1; min-height: 0; display: flex; flex-direction: column; }
