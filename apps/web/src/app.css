@@ -961,7 +961,7 @@ select.input { padding-right: 30px; text-overflow: ellipsis; }
 .pdf-pane__inner { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 18px; }
 .pdf-page { background: #fff; border-radius: 0; box-shadow: 0 0 0 1px var(--hairline), var(--shadow-card); }
 :root[data-theme="dark"] .pdf-page {
-  background: var(--bg-panel);
+  background: var(--bg-inset);
   filter: invert(0.92) hue-rotate(180deg);
 }
 :root[data-theme="dark"] .file-preview__page {
