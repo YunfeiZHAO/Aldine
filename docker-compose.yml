@@ -1,11 +1,19 @@
-# Minimal Aldine: prebuilt images, two services, done. This is all you need.
-# Everything else (building from source, auth/SSO/AI/email options, TLS,
-# Postgres/Redis) lives in docker-compose.full.yml. Both files share the same
-# project name and volumes, so you can switch between them without losing data.
+# Aldine: the app image is built from this checkout; the compiler is pulled
+# prebuilt (its TeX Live layers are ~1.4 GB and this source doesn't change it).
+# Everything else (auth/SSO/AI/email options, TLS, Postgres/Redis) lives in
+# docker-compose.full.yml. Both files share the same project name and volumes,
+# so you can switch between them without losing data.
+#   docker compose up -d --build      # rebuild the app after editing source
 name: aldine
 
 services:
   app:
+    # Build the app (web + server) from this checkout instead of pulling the
+    # published image, so local source changes appear. `image:` names what the
+    # build is tagged as; `docker compose up -d --build` rebuilds it.
+    build:
+      context: .
+      dockerfile: apps/server/Dockerfile
     image: ghcr.io/trahloff/aldine-app:${ALDINE_VERSION:-1.3.1}
     expose:
       - "3000"

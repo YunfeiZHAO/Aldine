@@ -8,6 +8,12 @@ What 1.0 changes about that is in [docs/STABILITY.md](docs/STABILITY.md).
 ## [Unreleased]
 
 ### Added
+- The appearance switcher (Match system / Light / Dark) is now a button in the
+  project toolbar, next to Settings — previously it was only in the command
+  palette while editing. The rendered PDF preview follows the theme too: in
+  dark mode the typeset pages are shown dark (text light), so the preview no
+  longer glares white against a dark editor. Colours, links and figures keep
+  their hue; switching back to light shows the pages as printed.
 - Citation numbers in the typeset preview show the reference they point to:
   hover one for a preview of its title, author, year and journal, or click to
   pin it open (Escape or a click away closes it). It reads the same
