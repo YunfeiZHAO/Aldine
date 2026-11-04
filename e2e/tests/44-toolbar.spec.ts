@@ -37,6 +37,35 @@ test.describe('editor toolbar', () => {
     } finally { await cleanup(request, id); }
   });
 
+  test('the appearance button toggles the theme and the rendered PDF follows it', async ({ page, request }) => {
+    const id = await createPaperProject(request, 'Toolbar Appearance');
+    try {
+      // Start from an explicit light choice so the test is independent of the
+      // system colour scheme the runner happens to report.
+      await openProject(page, id);
+      await page.evaluate(() => localStorage.setItem('aldine.theme', 'light'));
+      await page.reload();
+      await expectTypesetOk(page);
+      expect(await page.evaluate(() => document.documentElement.dataset.theme)).toBe('light');
+
+      const firstPage = page.locator('canvas.pdf-page').first();
+      const filterOf = () => firstPage.evaluate((el) => getComputedStyle(el).filter);
+      // Light: the pages are shown as printed — no inversion.
+      expect(await filterOf()).toBe('none');
+
+      // The button lives in the toolbar and opens the three-choice menu.
+      await page.getByTestId('theme-toggle').click();
+      await page.getByTestId('appearance-dark').click();
+      await expect.poll(() => page.evaluate(() => document.documentElement.dataset.theme)).toBe('dark');
+      // Dark: the rendered page carries the invert+hue-rotate filter.
+      await expect.poll(filterOf).not.toBe('none');
+
+      await page.getByTestId('theme-toggle').click();
+      await page.getByTestId('appearance-light').click();
+      await expect.poll(filterOf).toBe('none');
+    } finally { await cleanup(request, id); }
+  });
+
   test('the comment shortcut opens the composer on the selection', async ({ page, request }) => {
     const id = await createProject(request, 'Comment Shortcut');
     try {

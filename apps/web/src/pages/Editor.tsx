@@ -41,7 +41,7 @@ import { readSeen, markPrompted, markAcknowledged } from '../util/agentSeen';
 import FormatToolbar from '../components/FormatToolbar';
 import Splitter from '../components/Splitter';
 import { useAppearance } from '../theme';
-import { appearanceCommands } from '../components/Appearance';
+import { appearanceCommands, AppearanceMenuButton } from '../components/Appearance';
 import { useDocumentTitle } from '../util/documentTitle';
 import { matchesShortcut, useShortcutLabel } from '../util/shortcuts';
 import { shortcut } from '../platform';
@@ -1197,6 +1197,7 @@ export default function Editor() {
         <PaletteTrigger label="Search files and commands" onOpen={() => setPaletteOpen(true)} />
         <button className="btn" onClick={() => setShareOpen(true)} data-testid="share-project" title={canManageSharing ? 'Invite collaborators, share by link, download the PDF or the source' : 'Download the PDF or the source'}>Share</button>
         <button className="btn" onClick={() => setSettingsOpen(true)} data-testid="project-settings-open" title="Project settings: compiler, main document, TeX Live">Settings</button>
+        <AppearanceMenuButton />
         <button className="btn" onClick={startComment} data-testid="add-comment" title={`Comment on the selected text (${keys.comment})`}>
           Comment <kbd className="kbd toolbar__kbd">{keys.comment}</kbd>
         </button>
