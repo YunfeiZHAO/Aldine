@@ -7,6 +7,11 @@ const LS_EMAIL = 'aldine.readpaper_email';
 const LS_WS  = 'aldine.readpaper_workspace';
 let session: { url: string; token: string } | null = null;
 
+function pdfFilename(name: string): string {
+  const filename = name.trim().replace(/[\\/:*?"<>|]/g, '-') || 'document';
+  return /\.pdf$/i.test(filename) ? filename : `${filename}.pdf`;
+}
+
 function readConfig() {
   try {
     return {
@@ -101,7 +106,7 @@ function ConfigModal({ onClose, onSaved }: { onClose(): void; onSaved(): void })
 
 export async function sendToReadPaper(
   pdfUrl: string,
-  projectName: string,
+  filename: string,
   toast: (msg: string, kind?: 'ok' | 'error') => void,
 ): Promise<'sent' | 'failed' | 'reconnect'> {
   const conn = session;
@@ -115,9 +120,8 @@ export async function sendToReadPaper(
     toast(`Could not fetch the PDF: ${err.message}`, 'error');
     return 'failed';
   }
-  const filename = `${(projectName || 'document').replace(/[\\/:*?"<>|]/g, '-')}.pdf`;
   const form = new FormData();
-  form.append('files', pdfBlob, filename);
+  form.append('files', pdfBlob, pdfFilename(filename));
   const cfg = readConfig();
   if (cfg.workspace) form.append('workspace_name', cfg.workspace);
   form.append('on_conflict', 'replace');
@@ -159,22 +163,25 @@ export default function ReadPaperUploadButton({ pdfUrl, projectName }: {
 }) {
   const toast = useToast();
   const [configOpen, setConfigOpen] = useState(false);
+  const [sendOpen, setSendOpen] = useState(false);
+  const [filename, setFilename] = useState(() => pdfFilename(projectName));
   const [uploading, setUploading] = useState(false);
-  const pendingRef = useRef(false);
+  const pendingRef = useRef<{ url: string; filename: string } | null>(null);
 
   const onConfigSaved = () => {
     setConfigOpen(false);
-    if (pendingRef.current && pdfUrl) {
-      pendingRef.current = false;
-      doUpload(pdfUrl);
+    const pending = pendingRef.current;
+    pendingRef.current = null;
+    if (pending) {
+      void doUpload(pending.url, pending.filename);
     }
   };
 
-  const doUpload = async (url: string) => {
+  const doUpload = async (url: string, name: string) => {
     setUploading(true);
     try {
-      if (await sendToReadPaper(url, projectName, toast) === 'reconnect') {
-        pendingRef.current = true;
+      if (await sendToReadPaper(url, name, toast) === 'reconnect') {
+        pendingRef.current = { url, filename: name };
         setConfigOpen(true);
       }
     } finally {
@@ -184,12 +191,7 @@ export default function ReadPaperUploadButton({ pdfUrl, projectName }: {
 
   const handleClick = () => {
     if (!pdfUrl || uploading) return;
-    if (!hasReadPaperConfig()) {
-      pendingRef.current = true;
-      setConfigOpen(true);
-      return;
-    }
-    doUpload(pdfUrl);
+    setSendOpen(true);
   };
 
   return (
@@ -213,7 +215,38 @@ export default function ReadPaperUploadButton({ pdfUrl, projectName }: {
       >
         Connection
       </button>
-      {configOpen && <ConfigModal onClose={() => { setConfigOpen(false); pendingRef.current = false; }} onSaved={onConfigSaved} />}
+      {sendOpen && (
+        <Modal onClose={() => setSendOpen(false)} label="Send to read_paper" testId="readpaper-send">
+          <h2 style={{ marginBottom: 12 }}>Send to read_paper</h2>
+          <form onSubmit={(event) => {
+            event.preventDefault();
+            if (!pdfUrl || uploading || !filename.trim()) return;
+            setSendOpen(false);
+            void doUpload(pdfUrl, filename);
+          }}>
+            <label className="field__label" htmlFor="rp-filename">Filename</label>
+            <input
+              id="rp-filename"
+              className="input"
+              value={filename}
+              required
+              autoComplete="off"
+              data-testid="readpaper-filename"
+              onChange={(event) => setFilename(event.target.value)}
+            />
+            <p style={{ marginTop: 8, opacity: 0.7 }}>
+              The .pdf extension is added if needed. A file with the same name in the destination will be replaced.
+            </p>
+            <div className="modal__row" style={{ marginTop: 20 }}>
+              <button className="btn" type="button" onClick={() => setSendOpen(false)}>Cancel</button>
+              <button className="btn btn--primary" type="submit" disabled={!pdfUrl || uploading || !filename.trim()} data-testid="readpaper-send-confirm">
+                Send to read_paper
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
+      {configOpen && <ConfigModal onClose={() => { setConfigOpen(false); pendingRef.current = null; }} onSaved={onConfigSaved} />}
     </>
   );
 }
