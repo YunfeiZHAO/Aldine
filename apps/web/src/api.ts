@@ -501,6 +501,10 @@ export const api = {
   remoteConnect: (p: RemoteProviderId, token: string, baseUrl?: string) =>
     req<{ connected: boolean; login: string; baseUrl?: string }>(`/api/remotes/${p}/connect`, { method: 'POST', body: JSON.stringify({ token, baseUrl }) }),
   remoteDisconnect: (p: RemoteProviderId) => req<{ ok: boolean }>(`/api/remotes/${p}/disconnect`, { method: 'POST' }),
+  readerStatus: () => req<{ connected: boolean; email?: string; expired?: boolean }>('/api/remotes/reader/status'),
+  readerConnect: (readerUrl: string, email: string, password: string) =>
+    req<{ connected: boolean; email: string }>('/api/remotes/reader/connect', { method: 'POST', body: JSON.stringify({ readerUrl, email, password }) }),
+  readerDisconnect: () => req<{ ok: boolean }>('/api/remotes/reader/disconnect', { method: 'POST' }),
   /** Without `q` the first page of the user's repositories; with it, the host's own search (an exact owner/repo is looked up directly). */
   remoteRepos: async (p: RemoteProviderId, q?: string): Promise<RemoteRepo[]> => {
     const res = await fetch(withBase(`/api/remotes/${p}/repos${q ? `?q=${encodeURIComponent(q)}` : ''}`));

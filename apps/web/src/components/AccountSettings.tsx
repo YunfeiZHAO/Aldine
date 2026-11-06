@@ -260,6 +260,80 @@ function AgentAccess() {
   );
 }
 
+function ReaderConnect() {
+  const [status, setStatus] = useState<{ connected: boolean; email?: string; expired?: boolean } | null>(null);
+  const [showForm, setShowForm] = useState(false);
+  const [readerUrl, setReaderUrl] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [busy, setBusy] = useState(false);
+  const toast = useToast();
+
+  useEffect(() => { api.readerStatus().then(setStatus).catch(() => setStatus({ connected: false })); }, []);
+
+  const connect = async () => {
+    if (!readerUrl || !email || !password) { toast('All fields are required', 'error'); return; }
+    setBusy(true);
+    try {
+      const res = await api.readerConnect(readerUrl, email, password);
+      setStatus({ connected: true, email: res.email });
+      setShowForm(false);
+      setPassword('');
+      toast('Reader connected', 'ok');
+    } catch (err: any) {
+      toast(err.message || 'Connection failed', 'error');
+    }
+    setBusy(false);
+  };
+
+  const disconnect = async () => {
+    setBusy(true);
+    try {
+      await api.readerDisconnect();
+      setStatus({ connected: false });
+      toast('Reader disconnected', 'ok');
+    } catch (err: any) {
+      toast(err.message, 'error');
+    }
+    setBusy(false);
+  };
+
+  return (
+    <>
+      <div className="menu__label" style={{ margin: '18px 0 6px' }}>Reader</div>
+      {status === null ? (
+        <p style={{ color: 'var(--text-3)', fontSize: 'var(--text-m)', margin: 0 }}>Loading…</p>
+      ) : status.connected ? (
+        <div className="settings__row">
+          <span style={{ color: 'var(--text-2)', fontSize: 'var(--text-m)' }}>Connected as {status.email}</span>
+          <button className="btn" style={{ marginLeft: 'auto' }} onClick={disconnect} disabled={busy}>Disconnect</button>
+        </div>
+      ) : (
+        <>
+          {status.expired && (
+            <p style={{ color: 'var(--text-warning, #c97c00)', fontSize: 'var(--text-m)', margin: '0 0 8px' }}>
+              Session expired — sign in again to continue uploading.
+            </p>
+          )}
+          {!showForm ? (
+            <button className="btn btn--primary" onClick={() => setShowForm(true)}>Connect Reader</button>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <input className="input login__input" type="url" placeholder="Reader URL (e.g. https://reader.example.com)" aria-label="Reader URL" value={readerUrl} onChange={(e) => setReaderUrl(e.target.value)} />
+              <input className="input login__input" type="email" placeholder="Email" aria-label="Email" value={email} onChange={(e) => setEmail(e.target.value)} />
+              <input className="input login__input" type="password" placeholder="Password" aria-label="Password" value={password} onChange={(e) => setPassword(e.target.value)} />
+              <div style={{ display: 'flex', gap: 8, marginTop: 2 }}>
+                <button className="btn" onClick={() => { setShowForm(false); setPassword(''); }}>Cancel</button>
+                <button className="btn btn--primary" onClick={connect} disabled={busy} aria-busy={busy || undefined}>{busy ? '…' : 'Sign in'}</button>
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </>
+  );
+}
+
 const PROVIDER_NAME: Record<string, string> = { github: 'GitHub', google: 'Google', orcid: 'ORCID' };
 
 /** Account settings: identity, agent access, change password (password accounts only). */
@@ -316,6 +390,7 @@ export default function AccountSettings({ user, onClose }: { user: AuthUser; onC
             panel opened at scrollTop 0 must show the connector and the
             Create button, not clip them under the sticky footer. */}
         <AgentAccess />
+        <ReaderConnect />
 
         {isSso ? (
           <p style={{ color: 'var(--text-2)', fontSize: 'var(--text-m)', marginTop: 18 }}>

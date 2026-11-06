@@ -23,6 +23,8 @@ import { adoptRootIfUnset } from '../root.js';
 import { listAllTemplates, resolveTemplateSeed, type TemplateSeed } from '../templates.js';
 import { trashProject, restorableUntil, TRASH_DAYS } from '../trash.js';
 import { noteEdit, AGENT_EDITOR } from '../activity.js';
+import { uploadPdf, tokenExpired, type ReaderConnection } from '../reader.js';
+import { db } from '../db/index.js';
 import {
   McpDenied, projectNotFound, resolveProject, assertWritableProject, compileKey, assertFileTarget, isDirectoryPath, visiblePath, diskSpelling, type McpIdentity,
 } from './guards.js';
@@ -1136,6 +1138,44 @@ export function registerTools(server: McpServer, identity: McpIdentity, ctx: Too
         trashed: true, id: meta.id, name: meta.name, restorableUntil: restorableUntil(),
         note: `Restorable from the workspace trash for ${TRASH_DAYS} days`,
         ...(remote.error ? { remoteError: remote.error } : {}),
+      });
+    } catch (err) { return toolError(err); }
+  });
+
+  server.registerTool('upload_to_reader', {
+    description: 'Upload a compiled PDF from this project to the read-paper reader so it can be annotated and queried there. Call this after a successful compile when the user asks to send the paper to the reader. Returns the document id and a direct link. Requires the user to have connected their Reader account in Account Settings first — if not connected or session expired, tell them to open Account Settings and connect Reader.',
+    annotations: { readOnlyHint: false, idempotentHint: false },
+    inputSchema: {
+      project: projectParam,
+      branch: branchParam,
+      workspaceName: z.string().optional().describe('Reader workspace to upload into. Defaults to the project name.'),
+      onConflict: z.enum(['skip', 'replace']).optional().default('skip').describe('"skip" returns the existing document if the filename already exists; "replace" overwrites it.'),
+    },
+  }, async ({ project, branch = 'main', workspaceName, onConflict }) => {
+    try {
+      if (!identity.user) return fail('Reader upload requires a signed-in user — operator mode is not supported');
+      const conn = await db().getConnection(identity.user.id, 'reader') as ReaderConnection | null;
+      if (!conn) return fail('Reader is not connected. Open Account Settings and connect your Reader account first.');
+      if (tokenExpired(conn)) return fail('Reader session has expired. Open Account Settings and reconnect your Reader account.');
+      const meta = await resolveProject(identity, project);
+      const disk = outputOnDisk(meta.id, branch, meta.rootFile ?? 'main.tex');
+      if (!disk?.pdf) return fail('No compiled PDF found for this branch — run compile first');
+      const pdfPath = path.join(config.dataDir, 'projects', meta.id, disk.pdf);
+      if (!fs.existsSync(pdfPath)) return fail('PDF file not found on disk — run compile first');
+      const readerUrl = (conn as any).readerUrl as string;
+      if (!readerUrl) return fail('Reader connection is missing the server URL — reconnect in Account Settings.');
+      const results = await uploadPdf(readerUrl, conn.token, pdfPath, {
+        workspaceName: workspaceName || meta.name,
+        onConflict,
+      });
+      const result = results[0];
+      if (!result) return fail('Reader returned no result');
+      if (result.status === 'failed') return fail(`Reader upload failed: ${result.error ?? 'unknown error'}`);
+      return ok({
+        status: result.status,
+        document_id: result.document_id,
+        filename: result.filename,
+        readerUrl: `${readerUrl}/#doc=${result.document_id}`,
       });
     } catch (err) { return toolError(err); }
   });

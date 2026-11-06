@@ -17,6 +17,7 @@ import { trashProject, restorableUntil } from './trash.js';
 import { noteEdit, editorOf, forgetBranch, activitySnapshot, backfillLastEdits } from './activity.js';
 import type { ProjectActivity } from './db/types.js';
 import { db } from './db/index.js';
+import { tokenExp, tokenExpired, type ReaderConnection } from './reader.js';
 import { listPlugins, pluginAssetPath } from './plugins.js';
 import { listAllTemplates, resolveTemplateSeed, type TemplateSeed } from './templates.js';
 import { warmVenueCache } from './catalog.js';
@@ -2272,6 +2273,49 @@ h1{font-size:1.1rem;margin:0 0 .5rem}p{margin:0 0 1.25rem;color:var(--muted);ove
   providerRoute('post', 'disconnect', async (p, req, reply) => {
     if (requireSignIn(req, reply)) return;
     await remotes.disconnect(remoteUserId(req), p.id);
+    return { ok: true };
+  });
+
+  // ── Reader integration (read-paper) ──────────────────────────────────────
+  // Separate from the git-remote providers: reader uses its own email/password
+  // auth, not a PAT. The connection stores { token, email, exp } — no password.
+  const READER_PROVIDER = 'reader';
+
+  app.get('/api/remotes/reader/status', async (req: any, reply) => {
+    if (requireSignIn(req, reply)) return;
+    const conn = await db().getConnection(remoteUserId(req), READER_PROVIDER) as ReaderConnection | null;
+    if (!conn) return { connected: false };
+    const expired = tokenExpired(conn);
+    return { connected: !expired, email: conn.email, expired };
+  });
+
+  app.post('/api/remotes/reader/connect', async (req: any, reply) => {
+    if (requireSignIn(req, reply)) return;
+    const readerUrl = String(req.body?.readerUrl || '').trim().replace(/\/$/, '');
+    const email = String(req.body?.email || '').trim();
+    const password = String(req.body?.password || '').trim();
+    if (!readerUrl || !email || !password) return reply.code(400).send({ error: 'readerUrl, email and password are required' });
+    let token: string;
+    try {
+      const resp = await fetch(`${readerUrl}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      });
+      if (!resp.ok) return reply.code(401).send({ error: 'Invalid email or password' });
+      const body = await resp.json() as { token: string };
+      token = body.token;
+    } catch {
+      return reply.code(502).send({ error: 'Could not reach the Reader server' });
+    }
+    const exp = tokenExp(token);
+    await db().setConnection(remoteUserId(req), READER_PROVIDER, { token, email, exp, readerUrl });
+    return { connected: true, email };
+  });
+
+  app.post('/api/remotes/reader/disconnect', async (req: any, reply) => {
+    if (requireSignIn(req, reply)) return;
+    await db().deleteConnection(remoteUserId(req), READER_PROVIDER);
     return { ok: true };
   });
 

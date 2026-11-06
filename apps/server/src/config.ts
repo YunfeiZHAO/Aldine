@@ -81,6 +81,10 @@ export const config = {
   webDist: process.env.WEB_DIST || path.join(repoRoot, 'apps/web/dist'),
   basePath,
   publicUrl: publicAppUrl(process.env.ALDINE_PUBLIC_URL, basePath),
+  /** read-paper reader integration (batch-upload). All three must be set to enable the upload_to_reader MCP tool. */
+  readerUrl: process.env.READER_URL?.replace(/\/$/, '') || '',
+  readerEmail: process.env.READER_EMAIL || '',
+  readerPassword: process.env.READER_PASSWORD || '',
 };
 
 export const projectsDir = path.join(config.dataDir, 'projects');

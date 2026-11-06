@@ -1,74 +1,82 @@
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import Modal from './Modal';
 import { useToast } from './Toast';
 
 const LS_URL = 'aldine.readpaper_url';
-const LS_KEY = 'aldine.readpaper_apikey';
+const LS_EMAIL = 'aldine.readpaper_email';
 const LS_WS  = 'aldine.readpaper_workspace';
+let session: { url: string; token: string } | null = null;
 
 function readConfig() {
   try {
     return {
       url: localStorage.getItem(LS_URL) || '',
-      apiKey: localStorage.getItem(LS_KEY) || '',
+      email: localStorage.getItem(LS_EMAIL) || '',
       workspace: localStorage.getItem(LS_WS) || '',
     };
   } catch {
-    return { url: '', apiKey: '', workspace: '' };
+    return { url: '', email: '', workspace: '' };
   }
 }
 
-function saveConfig(url: string, apiKey: string, workspace: string) {
+function saveConfig(url: string, email: string, workspace: string) {
   try {
-    localStorage.setItem(LS_URL, url.trim());
-    localStorage.setItem(LS_KEY, apiKey.trim());
+    localStorage.setItem(LS_URL, url);
+    localStorage.setItem(LS_EMAIL, email);
     localStorage.setItem(LS_WS, workspace.trim());
+    localStorage.removeItem('aldine.readpaper_apikey');
   } catch { /* private window */ }
 }
 
 export function hasReadPaperConfig(): boolean {
-  try { return !!localStorage.getItem(LS_URL); } catch { return false; }
+  return !!session;
 }
 
-/** Config dialog: lets the user set the read_paper URL and API key. */
 function ConfigModal({ onClose, onSaved }: { onClose(): void; onSaved(): void }) {
   const cfg = readConfig();
   const [url, setUrl] = useState(cfg.url);
-  const [apiKey, setApiKey] = useState(cfg.apiKey);
+  const [email, setEmail] = useState(cfg.email);
+  const [password, setPassword] = useState('');
   const [workspace, setWorkspace] = useState(cfg.workspace);
+  const [busy, setBusy] = useState(false);
+  const toast = useToast();
 
-  const save = () => {
-    saveConfig(url, apiKey, workspace);
-    onSaved();
+  const connect = async () => {
+    setBusy(true);
+    try {
+      const base = url.trim().replace(/\/+$/, '');
+      const parsed = new URL(base);
+      if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('Enter an HTTP or HTTPS Reader URL');
+      const res = await fetch(`${base}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: email.trim(), password }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.detail || body.error || `Sign-in failed: HTTP ${res.status}`);
+      if (typeof body.token !== 'string' || !body.token) throw new Error('Reader returned no session token');
+      session = { url: base, token: body.token };
+      saveConfig(base, email.trim(), workspace);
+      setPassword('');
+      onSaved();
+    } catch (err: any) {
+      toast(`read_paper sign-in failed: ${err.message}`, 'error');
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
     <Modal onClose={onClose} label="Connect read_paper" width={440} testId="readpaper-config">
       <h2 style={{ marginBottom: 4 }}>Connect read_paper</h2>
-      <p className="modal__sub" style={{ marginBottom: 16 }}>
-        Compiled PDFs are sent to your read_paper instance. Set an upload API key with
-        <code style={{ marginLeft: 4 }}>READPAPER_UPLOAD_API_KEY</code> in read_paper's env.
-      </p>
+      <form onSubmit={(event) => { event.preventDefault(); if (!busy) void connect(); }}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         <label className="field__label" htmlFor="rp-url">read_paper URL</label>
-        <input
-          id="rp-url"
-          className="input"
-          placeholder="https://papers.example.com"
-          value={url}
-          autoComplete="off"
-          onChange={(e) => setUrl(e.target.value)}
-        />
-        <label className="field__label" htmlFor="rp-key">Upload API key</label>
-        <input
-          id="rp-key"
-          className="input"
-          type="password"
-          placeholder="READPAPER_UPLOAD_API_KEY value"
-          value={apiKey}
-          autoComplete="new-password"
-          onChange={(e) => setApiKey(e.target.value)}
-        />
+        <input id="rp-url" className="input" type="url" placeholder="https://papers.example.com" value={url} autoComplete="off" required disabled={busy} onChange={(event) => setUrl(event.target.value)} />
+        <label className="field__label" htmlFor="rp-email">Email</label>
+        <input id="rp-email" className="input" type="email" value={email} autoComplete="username" required disabled={busy} onChange={(event) => setEmail(event.target.value)} />
+        <label className="field__label" htmlFor="rp-password">Password</label>
+        <input id="rp-password" className="input" type="password" value={password} autoComplete="current-password" required disabled={busy} onChange={(event) => setPassword(event.target.value)} />
         <label className="field__label" htmlFor="rp-ws">Workspace name <span style={{ fontWeight: 400, opacity: 0.6 }}>(optional)</span></label>
         <input
           id="rp-ws"
@@ -76,72 +84,67 @@ function ConfigModal({ onClose, onSaved }: { onClose(): void; onSaved(): void })
           placeholder="My papers"
           value={workspace}
           autoComplete="off"
+          disabled={busy}
           onChange={(e) => setWorkspace(e.target.value)}
         />
       </div>
       <div className="modal__row" style={{ marginTop: 20 }}>
-        <button className="btn" onClick={onClose}>Cancel</button>
-        <button className="btn btn--primary" onClick={save} disabled={!url.trim() || !apiKey.trim()} data-testid="readpaper-save">
-          Save
+        <button className="btn" type="button" onClick={onClose} disabled={busy}>Cancel</button>
+        <button className="btn btn--primary" type="submit" disabled={busy || !url.trim() || !email.trim() || !password} data-testid="readpaper-save">
+          {busy ? 'Signing in…' : 'Sign in'}
         </button>
       </div>
+      </form>
     </Modal>
   );
 }
 
-/** Sends the PDF at ``pdfUrl`` to read_paper and shows a toast. Called from the PDF toolbar. */
 export async function sendToReadPaper(
   pdfUrl: string,
   projectName: string,
   toast: (msg: string, kind?: 'ok' | 'error') => void,
-): Promise<void> {
-  const cfg = readConfig();
-  if (!cfg.url || !cfg.apiKey) return;
-
-  const filename = `${(projectName || 'document').replace(/[\\/:*?"<>|]/g, '-')}.pdf`;
-
+): Promise<'sent' | 'failed' | 'reconnect'> {
+  const conn = session;
+  if (!conn) return 'reconnect';
   let pdfBlob: Blob;
   try {
     const res = await fetch(pdfUrl);
-    if (!res.ok) throw new Error(`PDF fetch failed: ${res.status}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     pdfBlob = await res.blob();
   } catch (err: any) {
     toast(`Could not fetch the PDF: ${err.message}`, 'error');
-    return;
+    return 'failed';
   }
-
+  const filename = `${(projectName || 'document').replace(/[\\/:*?"<>|]/g, '-')}.pdf`;
   const form = new FormData();
-  form.append('files', pdfBlob, filename);
+  form.append('file', pdfBlob, filename);
+  const cfg = readConfig();
   if (cfg.workspace) form.append('workspace_name', cfg.workspace);
   form.append('on_conflict', 'replace');
-
   try {
-    const base = cfg.url.replace(/\/+$/, '');
-    const res = await fetch(`${base}/api/batch-upload`, {
+    const res = await fetch(`${conn.url}/api/batch-upload`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${cfg.apiKey}` },
+      headers: { Authorization: `Bearer ${conn.token}` },
       body: form,
     });
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      throw new Error(body.detail || `HTTP ${res.status}`);
+    if (res.status === 401) {
+      session = null;
+      toast('Reader session expired. Sign in to read_paper again.', 'error');
+      return 'reconnect';
     }
-    const data = await res.json();
-    const result = data.results?.[0];
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.detail || body.error || `HTTP ${res.status}`);
+    const result = body.results?.[0];
     if (!result) throw new Error('No result returned');
     if (result.status === 'failed') throw new Error(result.error || 'Upload failed');
-    const label = result.status === 'created' ? 'Sent to read_paper' : 'Updated in read_paper';
-    toast(label, 'ok');
+    toast(result.status === 'created' ? 'Sent to read_paper' : 'Updated in read_paper', 'ok');
+    return 'sent';
   } catch (err: any) {
     toast(`read_paper upload failed: ${err.message}`, 'error');
+    return 'failed';
   }
 }
 
-/** The upload button that lives in the PDF pane toolbar.
- *
- * Shows a config modal on first use (or when settings need changing), then
- * fetches the compiled PDF and POSTs it to the configured read_paper instance.
- */
 export default function ReadPaperUploadButton({ pdfUrl, projectName }: {
   pdfUrl: string | null;
   projectName: string;
@@ -151,7 +154,6 @@ export default function ReadPaperUploadButton({ pdfUrl, projectName }: {
   const [uploading, setUploading] = useState(false);
   const pendingRef = useRef(false);
 
-  // After config is saved, trigger the pending upload if any.
   const onConfigSaved = () => {
     setConfigOpen(false);
     if (pendingRef.current && pdfUrl) {
@@ -163,7 +165,10 @@ export default function ReadPaperUploadButton({ pdfUrl, projectName }: {
   const doUpload = async (url: string) => {
     setUploading(true);
     try {
-      await sendToReadPaper(url, projectName, toast);
+      if (await sendToReadPaper(url, projectName, toast) === 'reconnect') {
+        pendingRef.current = true;
+        setConfigOpen(true);
+      }
     } finally {
       setUploading(false);
     }
@@ -185,11 +190,20 @@ export default function ReadPaperUploadButton({ pdfUrl, projectName }: {
         className="btn btn--ghost btn--small"
         onClick={handleClick}
         disabled={!pdfUrl || uploading}
-        title={hasReadPaperConfig() ? 'Send PDF to read_paper' : 'Configure read_paper connection'}
+        title="Send PDF to read_paper"
         data-testid="readpaper-upload"
         aria-label={uploading ? 'Sending to read_paper…' : 'Send to read_paper'}
       >
         {uploading ? 'Sending…' : 'Send to read_paper'}
+      </button>
+      <button
+        className="btn btn--ghost btn--small"
+        onClick={() => setConfigOpen(true)}
+        disabled={uploading}
+        data-testid="readpaper-settings"
+        title="Configure read_paper connection"
+      >
+        Connection
       </button>
       {configOpen && <ConfigModal onClose={() => { setConfigOpen(false); pendingRef.current = false; }} onSaved={onConfigSaved} />}
     </>
