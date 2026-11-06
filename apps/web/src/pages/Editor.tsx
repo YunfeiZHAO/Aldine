@@ -23,6 +23,7 @@ import Presence, { PresenceUser } from '../components/Presence';
 import { PluginHost, PluginPanel } from '../plugins/host';
 import { hintFor } from '../editor/errorHints';
 import { IconChevronLeft, IconChevronRight, IconSearch, IconSidebar } from '../components/Icons';
+import ReadPaperUploadButton from '../components/ReadPaperUpload';
 import CommandPalette, { Command, PaletteTrigger } from '../components/CommandPalette';
 import ConnectClaudeModal from '../components/ClaudeConnect';
 import { invalidateBibCache, invalidateLabelCache } from '../editor/latexExtras';
@@ -1549,6 +1550,12 @@ export default function Editor() {
               );
             })()}
             <span className="toolbar__spacer" />
+            {hasPdf && (
+              <ReadPaperUploadButton
+                pdfUrl={compile.result?.pdfUrl || null}
+                projectName={project.name}
+              />
+            )}
             {activeFile && !previewing && (
               <button
                 className="btn btn--ghost btn--small"
