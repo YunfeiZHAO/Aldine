@@ -117,7 +117,7 @@ export async function sendToReadPaper(
   }
   const filename = `${(projectName || 'document').replace(/[\\/:*?"<>|]/g, '-')}.pdf`;
   const form = new FormData();
-  form.append('file', pdfBlob, filename);
+  form.append('files', pdfBlob, filename);
   const cfg = readConfig();
   if (cfg.workspace) form.append('workspace_name', cfg.workspace);
   form.append('on_conflict', 'replace');
@@ -137,7 +137,15 @@ export async function sendToReadPaper(
     const result = body.results?.[0];
     if (!result) throw new Error('No result returned');
     if (result.status === 'failed') throw new Error(result.error || 'Upload failed');
-    toast(result.status === 'created' ? 'Sent to read_paper' : 'Updated in read_paper', 'ok');
+    if (result.status === 'created') {
+      toast('Sent to read_paper', 'ok');
+    } else if (result.status === 'replaced') {
+      toast('Updated in read_paper', 'ok');
+    } else if (result.status === 'already_exists') {
+      toast('Already in read_paper', 'ok');
+    } else {
+      throw new Error(`Unexpected upload status: ${result.status}`);
+    }
     return 'sent';
   } catch (err: any) {
     toast(`read_paper upload failed: ${err.message}`, 'error');
