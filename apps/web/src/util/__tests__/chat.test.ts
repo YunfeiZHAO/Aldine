@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { apiMessages, applicableText, lines, mergeSettings, splitFences, sseData, transcriptPrompt, type ChatMessage } from '../chat';
+import { apiMessages, applicableText, bridgeToolStatus, lines, mergeSettings, splitFences, sseData, transcriptPrompt, type ChatMessage } from '../chat';
 
 const stream = (chunks: string[]) => {
   const enc = new TextEncoder();
@@ -38,6 +38,26 @@ describe('chat messages', () => {
     expect(p).toContain('User:\nfirst');
     expect(p).toContain('Assistant:\nreply');
     expect(p.trimEnd().endsWith('second')).toBe(true);
+  });
+
+  it('tells the bridge not to edit unless it was given the project', () => {
+    const h: ChatMessage[] = [{ id: '1', role: 'user', content: 'Fix the typo' }];
+    expect(transcriptPrompt(h)).toContain('Do not modify any files.');
+    const editing = transcriptPrompt(h, true);
+    expect(editing).not.toContain('Do not modify any files.');
+    expect(editing).toContain('edit_file');
+  });
+});
+
+describe('bridge tool progress', () => {
+  it('names the Aldine tool and the file it touches', () => {
+    expect(bridgeToolStatus({ type: 'tool_use', name: 'mcp__aldine__edit_file', command: '{"path": "sections/intro.tex", "edits": []}' })).toBe('Editing sections/intro.tex');
+    expect(bridgeToolStatus({ type: 'tool_use', name: 'mcp__aldine__read_file', command: '{"path": "main.tex"}' })).toBe('Reading main.tex');
+    expect(bridgeToolStatus({ type: 'tool_use', name: 'mcp__aldine__compile', command: '{}' })).toBe('Compiling');
+    expect(bridgeToolStatus({ type: 'tool_use', name: 'mcp__aldine__edit_file', command: '{"path": "main.tex", "edits": [{"quo' })).toBe('Editing');
+    expect(bridgeToolStatus({ type: 'tool_use', name: 'mcp__aldine__get_pdf_url' })).toBe('Running get pdf url');
+    expect(bridgeToolStatus({ type: 'tool_use', name: 'Skill' })).toBe('Using a skill');
+    expect(bridgeToolStatus({ type: 'command_execution', name: 'Bash' })).toBe('Running a command');
   });
 });
 

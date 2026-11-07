@@ -99,31 +99,76 @@ test.describe('sidebar chat', () => {
     await expect(page.locator('.cm-content')).toContainText('\\emph{local}\\end{document}');
   });
 
-  test('the local Claude Code bridge: health check, tool progress and the answer', async ({ page }) => {
-    const BRIDGE = 'http://127.0.0.1:8765';
-    let prompt = '';
+  async function mockBridge(page: Page, events: object[], health: object = { service: 'aldine', ok: true, claude: '9.9.9 (Claude Code)' }) {
+    const BRIDGE = 'http://127.0.0.1:8766';
+    const sent: { body: any } = { body: null };
     await page.route(`${BRIDGE}/**`, async (route) => {
       const cors = { 'access-control-allow-origin': '*', 'access-control-allow-headers': 'content-type' };
       const req = route.request();
       if (req.method() === 'OPTIONS') return route.fulfill({ status: 204, headers: cors });
-      if (req.url().endsWith('/health')) return route.fulfill({ headers: cors, json: { ok: true, claude: '9.9.9 (Claude Code)' } });
-      prompt = req.postDataJSON().prompt;
-      const lines = [
-        { type: 'item.started', item: { id: 't1', type: 'command_execution', command: 'ls' } },
-        { type: 'item.completed', item: { id: 't1', type: 'command_execution', aggregated_output: '' } },
-        { type: 'agent_message', text: 'Bridge says hi' },
-        { bridge: 'done' },
-      ];
-      await route.fulfill({ headers: { ...cors, 'content-type': 'application/x-ndjson' }, body: lines.map((l) => JSON.stringify(l)).join('\n') + '\n' });
+      if (req.url().endsWith('/health')) return route.fulfill({ headers: cors, json: health });
+      sent.body = req.postDataJSON();
+      await route.fulfill({ headers: { ...cors, 'content-type': 'application/x-ndjson' }, body: [...events, { bridge: 'done' }].map((l) => JSON.stringify(l)).join('\n') + '\n' });
     });
+    return sent;
+  }
+
+  test('the local Claude Code bridge gets this project\'s MCP connector and reports its edits', async ({ page }) => {
+    const sent = await mockBridge(page, [
+      { type: 'item.started', item: { id: 't1', type: 'tool_use', name: 'mcp__aldine__read_file', command: '{"path": "main.tex"}' } },
+      { type: 'item.completed', item: { id: 't1', type: 'tool_use', name: 'mcp__aldine__read_file', status: 'completed', aggregated_output: '{}' } },
+      { type: 'item.started', item: { id: 't2', type: 'tool_use', name: 'mcp__aldine__edit_file', command: '{"path": "main.tex", "edits": []}' } },
+      { type: 'item.completed', item: { id: 't2', type: 'tool_use', name: 'mcp__aldine__edit_file', status: 'completed', aggregated_output: '{"applied":1}' } },
+      { type: 'agent_message', text: 'Bridge edited the fox line' },
+    ]);
     await page.getByTestId('tab-chat').click();
     await page.getByTestId('chat-provider').selectOption('local-bridge');
     await page.getByTestId('chat-settings-toggle').click();
     await page.getByTestId('chat-bridge-check').click();
     await expect(page.getByTestId('chat-bridge-status')).toContainText('Connected · 9.9.9');
+    await page.getByTestId('chat-input').fill('Make the fox line livelier');
+    await page.getByTestId('chat-send').click();
+    await expect(page.getByTestId('chat-answer').last()).toContainText('Bridge edited the fox line');
+    await expect(page.getByTestId('chat-step')).toHaveText(['Reading main.tex', 'Editing main.tex']);
+    await expect(page.getByTestId('chat-notice')).toHaveCount(0);
+
+    expect(sent.body.prompt).toContain('Make the fox line livelier');
+    expect(sent.body.prompt).not.toContain('Do not modify any files');
+    expect(sent.body.aldine.projectId).toBe(id);
+    expect(sent.body.aldine.activeFile).toBe('main.tex');
+    expect(sent.body.aldine.token).toBe('aldine-e2e-mcp');
+    expect(sent.body.aldine.mcpUrl).toMatch(/^https?:\/\/[^/]+\/mcp$/);
+    const tools = await page.request.post(sent.body.aldine.mcpUrl, {
+      headers: { authorization: `Bearer ${sent.body.aldine.token}`, accept: 'application/json, text/event-stream' },
+      data: { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} },
+    });
+    expect(tools.ok(), 'the credential the bridge receives opens /mcp').toBe(true);
+  });
+
+  test('another local bridge on the URL (read_paper\'s) is refused before anything is sent', async ({ page }) => {
+    const sent = await mockBridge(page, [{ type: 'agent_message', text: 'should not run' }], { ok: true, claude: '9.9.9 (Claude Code)' });
+    await page.getByTestId('tab-chat').click();
+    await page.getByTestId('chat-provider').selectOption('local-bridge');
+    await page.getByTestId('chat-settings-toggle').click();
+    await page.getByTestId('chat-bridge-check').click();
+    await expect(page.getByTestId('chat-bridge-status')).toContainText('A different bridge answers here');
     await page.getByTestId('chat-input').fill('Hi bridge');
     await page.getByTestId('chat-send').click();
-    await expect(page.getByTestId('chat-answer').last()).toContainText('Bridge says hi');
-    expect(prompt).toContain('Hi bridge');
+    await expect(page.getByTestId('chat-error')).toContainText('is not the Aldine bridge');
+    expect(sent.body).toBeNull();
+  });
+
+  test('without an MCP credential the bridge only chats, and the answer says why', async ({ page }) => {
+    await page.route('**/api/projects/*/ai/bridge-token', (route) =>
+      route.fulfill({ status: 409, json: { error: 'This server has no MCP connector, so Local Claude Code can only chat.' } }));
+    const sent = await mockBridge(page, [{ type: 'agent_message', text: 'Just chatting' }]);
+    await page.getByTestId('tab-chat').click();
+    await page.getByTestId('chat-provider').selectOption('local-bridge');
+    await page.getByTestId('chat-input').fill('Hi bridge');
+    await page.getByTestId('chat-send').click();
+    await expect(page.getByTestId('chat-answer').last()).toContainText('Just chatting');
+    await expect(page.getByTestId('chat-notice')).toContainText('no MCP connector');
+    expect(sent.body.aldine).toBeUndefined();
+    expect(sent.body.prompt).toContain('Do not modify any files');
   });
 });

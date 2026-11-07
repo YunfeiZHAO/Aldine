@@ -131,6 +131,10 @@ const mb = (bytes: number) => Math.round(bytes / (1024 * 1024));
 
 /** Collaborators and open invitations a project holds at most, together. */
 const MAX_SHARE_ENTRIES = 50;
+/** Name of the per-project token the Local Claude Code bridge runs with; the
+ *  bridge-token route revokes earlier ones by this name. */
+const BRIDGE_TOKEN_NAME = 'Local Claude Code (chat)';
+const BRIDGE_TOKEN_TTL_MS = 12 * 60 * 60 * 1000;
 
 /** Engines the compiler distinguishes; anything else silently became pdflatex. */
 export const ENGINES = ['pdf', 'xelatex', 'lualatex'] as const;
@@ -2691,6 +2695,37 @@ h1{font-size:1.1rem;margin:0 0 .5rem}p{margin:0 0 1.25rem;color:var(--muted);ove
       clearTimeout(timer);
       if (!raw.destroyed) raw.end();
     }
+  });
+
+  // ---------- Local Claude Code bridge: a credential for this project's MCP ----------
+  // The bridge on the user's computer starts `claude` with this project's /mcp
+  // injected, so the browser asks here for a credential to hand it. With
+  // accounts that is a short-lived token scoped to this one project (earlier
+  // ones for the same project are revoked, so the Agent access list holds at
+  // most one per project). Without accounts every visitor is already the
+  // operator, so the static ALDINE_MCP_TOKEN grants nothing the web UI doesn't.
+  app.post<{ Params: { id: string } }>('/api/projects/:id/ai/bridge-token', async (req, reply) => {
+    if (!(await chatLimiter.take(clientKey(req, reqUser(req)?.id)))) return reply.code(429).send({ error: 'Chat rate limit reached — please slow down' });
+    if (process.env.ALDINE_MCP !== '1') {
+      return reply.code(409).send({ error: 'This server has no MCP connector, so Local Claude Code can only chat. Ask the operator to set ALDINE_MCP=1 to let it edit the project.' });
+    }
+    const mcpUrl = `${publicBase(req)}/mcp`;
+    if (!auth.AUTH_ENABLED) {
+      const token = process.env.ALDINE_MCP_TOKEN;
+      if (!token) return reply.code(409).send({ error: 'The MCP connector has no token, so Local Claude Code can only chat. Ask the operator to set ALDINE_MCP_TOKEN.' });
+      return { mcpUrl, token, expiresAt: null };
+    }
+    const user = reqUser(req);
+    if (!user) return reply.code(401).send({ error: 'Sign in required' });
+    const projectId = req.params.id;
+    for (const t of await auth.listAccessTokens(user.id)) {
+      if (t.name === BRIDGE_TOKEN_NAME && t.projectIds?.length === 1 && t.projectIds[0] === projectId) {
+        await auth.revokeAccessToken(user.id, t.id);
+      }
+    }
+    const expiresAt = new Date(Date.now() + BRIDGE_TOKEN_TTL_MS).toISOString();
+    const { token } = await auth.createAccessToken(user.id, BRIDGE_TOKEN_NAME, [projectId], expiresAt);
+    return { mcpUrl, token, expiresAt };
   });
 
   // ---------- plugins ----------

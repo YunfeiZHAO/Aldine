@@ -101,7 +101,9 @@ export default function ChatPanel({ projectId, activeFile, selection, visible, o
       await streamChat(projectId, settings, turns, {
         onDelta: (d) => { setStatus(''); patch((m) => ({ ...m, content: m.content + d })); },
         onStatus: setStatus,
-      }, ac.signal);
+        onStep: (step) => patch((m) => ({ ...m, steps: [...(m.steps ?? []), step] })),
+        onNotice: (notice) => patch((m) => ({ ...m, notice })),
+      }, ac.signal, activeFile);
     } catch (err: any) {
       if (!ac.signal.aborted) patch((m) => ({ ...m, error: String(err?.message || err) }));
     } finally {
@@ -124,7 +126,9 @@ export default function ChatPanel({ projectId, activeFile, selection, visible, o
     setBridge('Checking…');
     try {
       const h = await bridgeHealth(ps.baseUrl);
-      setBridge(h.ok ? `Connected${h.claude ? ` · ${h.claude}` : ''}` : 'The bridge is running but cannot find the claude CLI');
+      setBridge(!h.aldine
+        ? `A different bridge answers here (read_paper's?). Use ${PROVIDERS['local-bridge'].urlPlaceholder} and start bridge/install.sh.`
+        : h.ok ? `Connected${h.claude ? ` · ${h.claude}` : ''}` : 'The bridge is running but cannot find the claude CLI');
     } catch {
       setBridge('Not running');
     }
@@ -190,7 +194,7 @@ export default function ChatPanel({ projectId, activeFile, selection, visible, o
           <p className="chat__hint">
             {info.local
               ? provider === 'local-bridge'
-                ? 'Your browser talks to the read_paper bridge on this computer, which runs your local Claude Code. Nothing passes through the Aldine server.'
+                ? 'Your browser talks to the Aldine bridge on this computer, which runs your local Claude Code with this project\'s MCP connector, so it can read, edit and compile the project. Its edits are committed and can be reverted in History.'
                 : 'Your browser calls the model on this computer directly (Ollama, LM Studio, llama.cpp). The server must allow this page as an origin, e.g. OLLAMA_ORIGINS=*.'
               : 'Kept in this browser only. Each message is sent through the Aldine server to this endpoint; the server does not store the key.'}
           </p>
@@ -215,6 +219,12 @@ export default function ChatPanel({ projectId, activeFile, selection, visible, o
         ) : (
           <div key={m.id} className="chat__msg chat__msg--assistant" data-testid="chat-answer">
             {m.via && <div className="chat__via">{m.via}</div>}
+            {m.notice && <div className="chat__hint" data-testid="chat-notice">Chat only: {m.notice}</div>}
+            {m.steps && m.steps.length > 0 && (
+              <ul className="chat__steps" data-testid="chat-steps">
+                {m.steps.map((step, i) => <li key={i} data-testid="chat-step">{step}</li>)}
+              </ul>
+            )}
             {m.content && <Answer text={m.content} />}
             {!m.content && !m.error && busy && i === history.length - 1 && <div className="chat__status" data-testid="chat-status">{status || 'Thinking…'}</div>}
             {m.error && <div className="chat__error" role="alert" data-testid="chat-error">{m.error}</div>}

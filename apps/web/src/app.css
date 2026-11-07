@@ -914,6 +914,7 @@ select.input { padding-right: 30px; text-overflow: ellipsis; }
 .chat__prose { white-space: pre-wrap; }
 .chat__code { margin: 0; padding: 6px 8px; border-radius: var(--radius-s); background: var(--bg-inset); border: 1px solid var(--hairline); font: var(--text-s)/1.45 var(--font-mono, ui-monospace, monospace); white-space: pre-wrap; overflow-wrap: anywhere; }
 .chat__ctx, .chat__via { font-size: var(--text-s); color: var(--text-3); }
+.chat__steps { margin: 2px 0 4px; padding-left: 16px; font-size: var(--text-s); color: var(--text-3); }
 .chat__status { font-size: var(--text-s); color: var(--text-3); font-style: italic; }
 .chat__error { font-size: var(--text-s); color: var(--error); white-space: pre-wrap; }
 .chat__actions { display: flex; flex-wrap: wrap; gap: 2px; margin-left: -6px; }

@@ -20,13 +20,17 @@ export interface ChatMessage {
   /** Assistant only: which provider and model answered. */
   via?: string;
   error?: string;
+  /** Assistant only: why the answer could not edit the project. */
+  notice?: string;
+  /** Assistant only: the bridge's tool calls, in order ("Editing main.tex"). */
+  steps?: string[];
 }
 
 export const PROVIDERS: Record<ChatProviderId, { label: string; local: boolean; needsKey: boolean; urlPlaceholder: string; modelPlaceholder: string }> = {
   anthropic: { label: 'Claude', local: false, needsKey: true, urlPlaceholder: 'https://api.anthropic.com', modelPlaceholder: 'claude-sonnet-5-5' },
   openai: { label: 'OpenAI-compatible', local: false, needsKey: true, urlPlaceholder: 'https://api.openai.com/v1', modelPlaceholder: 'gpt-5.5' },
   'local-openai': { label: 'Local model', local: true, needsKey: false, urlPlaceholder: 'http://localhost:11434/v1', modelPlaceholder: 'llama3.2' },
-  'local-bridge': { label: 'Local Claude Code', local: true, needsKey: false, urlPlaceholder: 'http://127.0.0.1:8765', modelPlaceholder: 'sonnet' },
+  'local-bridge': { label: 'Local Claude Code', local: true, needsKey: false, urlPlaceholder: 'http://127.0.0.1:8766', modelPlaceholder: 'sonnet' },
 };
 
 export const PROVIDER_ORDER: ChatProviderId[] = ['anthropic', 'openai', 'local-openai', 'local-bridge'];
@@ -86,12 +90,21 @@ export function apiMessages(history: ChatMessage[]): Array<{ role: 'user' | 'ass
   return out;
 }
 
-/** The whole conversation as one prompt, for the Claude Code bridge (one-shot `claude -p`). */
-export function transcriptPrompt(history: ChatMessage[]): string {
+export const EDIT_PROMPT = `You are a writing and LaTeX assistant inside Aldine, a collaborative LaTeX editor.
+The user may share text they selected in their document, quoted with its file name and line numbers.
+You can read and edit this project with the aldine tools. When the user asks for a change, make it in the file with edit_file (read the file first; quote the text verbatim) instead of pasting replacement code. Every edit appears live in the editor and is committed, so the user can review or revert it.
+If the user only asks a question or wants a suggestion, answer without editing.
+After editing, say in one or two sentences what you changed and where.`;
+
+/** The whole conversation as one prompt, for the Claude Code bridge (one-shot `claude -p`).
+ *  `canEdit`: the bridge was given this project's MCP connector. */
+export function transcriptPrompt(history: ChatMessage[], canEdit = false): string {
   const msgs = apiMessages(history);
   const last = msgs.pop();
   const earlier = msgs.map((m) => `${m.role === 'user' ? 'User' : 'Assistant'}:\n${m.content}`).join('\n\n');
-  return `${SYSTEM_PROMPT}\n\n${earlier ? `Conversation so far:\n\n${earlier}\n\n` : ''}Answer this message. Do not modify any files.\n\n${last?.content ?? ''}`;
+  const intro = canEdit ? EDIT_PROMPT : SYSTEM_PROMPT;
+  const ask = canEdit ? 'Answer this message.' : 'Answer this message. Do not modify any files.';
+  return `${intro}\n\n${earlier ? `Conversation so far:\n\n${earlier}\n\n` : ''}${ask}\n\n${last?.content ?? ''}`;
 }
 
 /** The text an answer applies: its first fenced block when it has one, else all of it. */
@@ -151,6 +164,10 @@ export interface StreamHandlers {
   onDelta(text: string): void;
   /** Progress that is not answer text (the bridge's tool calls). */
   onStatus?(status: string): void;
+  /** One tool call the bridge made, kept with the answer. */
+  onStep?(step: string): void;
+  /** Why this answer cannot edit the project. */
+  onNotice?(notice: string): void;
 }
 
 async function errorOf(res: Response, fallback: string): Promise<Error> {
@@ -211,24 +228,78 @@ async function streamLocalOpenAI(s: ProviderSettings, history: ChatMessage[], h:
   }
 }
 
-/** The read_paper bridge (bridge/server.py): runs the local `claude` CLI and streams NDJSON events. */
-async function streamLocalBridge(s: ProviderSettings, history: ChatMessage[], h: StreamHandlers, signal: AbortSignal) {
+export interface BridgeCredential { mcpUrl: string; token: string; expiresAt: string | null }
+
+const credentials = new Map<string, BridgeCredential>();
+/** A credential is reused until this close to its expiry. */
+const CREDENTIAL_MARGIN_MS = 10 * 60 * 1000;
+
+/** This project's MCP endpoint and a token for it, or the reason the bridge can only chat. */
+export async function bridgeCredential(projectId: string): Promise<BridgeCredential | { unavailable: string }> {
+  const cached = credentials.get(projectId);
+  if (cached && (!cached.expiresAt || Date.parse(cached.expiresAt) - Date.now() > CREDENTIAL_MARGIN_MS)) return cached;
+  credentials.delete(projectId);
+  const res = await fetch(withBase(`/api/projects/${encodeURIComponent(projectId)}/ai/bridge-token`), { method: 'POST' });
+  if (!res.ok) return { unavailable: (await errorOf(res, 'Could not get a token for Local Claude Code')).message };
+  const c = (await res.json()) as BridgeCredential;
+  credentials.set(projectId, c);
+  return c;
+}
+
+const TOOL_VERBS: Record<string, string> = {
+  read_file: 'Reading', edit_file: 'Editing', write_file: 'Writing', batch_write: 'Editing files',
+  project_structure: 'Looking at the project files', compile: 'Compiling', list_citations: 'Checking citations',
+  list_labels: 'Checking labels', references_add: 'Adding a reference', wordcount: 'Counting words',
+};
+
+/** Progress line for one bridge tool call (`item` of an item.started event). */
+export function bridgeToolStatus(item: { type?: string; name?: string; command?: string }): string {
+  if (item.type === 'web_search') return 'Searching the web';
+  if (item.type === 'command_execution') return 'Running a command';
+  const name = item.name || '';
+  const aldine = /^mcp__aldine__(.+)$/.exec(name);
+  if (!aldine) return name === 'Skill' ? 'Using a skill' : `Running ${name || 'a tool'}`;
+  const verb = TOOL_VERBS[aldine[1]] ?? `Running ${aldine[1].replace(/_/g, ' ')}`;
+  let path = '';
+  try { const input = JSON.parse(item.command || '{}'); if (typeof input.path === 'string') path = input.path; } catch { /* truncated input */ }
+  return path && /^(Reading|Editing|Writing)$/.test(verb) ? `${verb} ${path}` : verb;
+}
+
+/** The Aldine bridge (bridge/server.py in this repo): runs the local `claude` CLI and streams NDJSON
+ *  events. Given a credential it starts claude with this project's MCP connector, so the
+ *  answer can edit the project; otherwise claude runs without tools and only chats. */
+async function streamLocalBridge(projectId: string, s: ProviderSettings, history: ChatMessage[], h: StreamHandlers, signal: AbortSignal, activeFile: string | null) {
   const base = (s.baseUrl.trim() || PROVIDERS['local-bridge'].urlPlaceholder).replace(/\/+$/, '');
+  if (!verifiedBridges.has(base)) {
+    let health: Awaited<ReturnType<typeof bridgeHealth>>;
+    try { health = await bridgeHealth(base); } catch (err) {
+      if (signal.aborted) throw err;
+      throw new Error(`Could not reach the Claude Code bridge at ${base}. Start it with bridge/install.sh from the Aldine repository, or run python3 bridge/server.py.`);
+    }
+    if (!health.aldine) throw new Error(notAldineBridge(base));
+    verifiedBridges.add(base);
+  }
+  const cred = await bridgeCredential(projectId).catch((err) => ({ unavailable: String(err?.message || err) }));
+  const canEdit = !('unavailable' in cred);
+  if (!canEdit) h.onNotice?.(cred.unavailable);
   let res: Response;
   try {
     res = await fetch(`${base}/run`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ prompt: transcriptPrompt(history), ...(s.model.trim() ? { model: s.model.trim() } : {}) }),
+      body: JSON.stringify({
+        prompt: transcriptPrompt(history, canEdit),
+        ...(s.model.trim() ? { model: s.model.trim() } : {}),
+        ...(canEdit ? { aldine: { mcpUrl: cred.mcpUrl, token: cred.token, projectId, activeFile } } : {}),
+      }),
       signal,
     });
   } catch (err) {
     if (signal.aborted) throw err;
-    throw new Error(`Could not reach the Claude Code bridge at ${base}. Start it with bridge/install.sh from read_paper, or run python3 bridge/server.py.`);
+    throw new Error(`Could not reach the Claude Code bridge at ${base}. Start it with bridge/install.sh from the Aldine repository, or run python3 bridge/server.py.`);
   }
   if (!res.ok || !res.body) throw await errorOf(res, 'The bridge refused the request');
   let answered = false;
-  let tools = 0;
   for await (const line of lines(res.body)) {
     if (!line.trim()) continue;
     let j: any;
@@ -236,9 +307,9 @@ async function streamLocalBridge(s: ProviderSettings, history: ChatMessage[], h:
     if (j.bridge === 'error') throw new Error(String(j.message || 'The bridge reported an error'));
     if (j.bridge === 'done') continue;
     if (j.type === 'item.started') {
-      tools += 1;
-      const it = j.item || {};
-      h.onStatus?.(`Running ${it.name || (it.type === 'web_search' ? 'web search' : 'a command')} (${tools} tool call${tools === 1 ? '' : 's'})`);
+      const step = bridgeToolStatus(j.item || {});
+      h.onStatus?.(step);
+      h.onStep?.(step);
     } else if (j.type === 'agent_message' && typeof j.text === 'string') {
       answered = true;
       h.onDelta(j.text);
@@ -247,14 +318,22 @@ async function streamLocalBridge(s: ProviderSettings, history: ChatMessage[], h:
   if (!answered && !signal.aborted) throw new Error('The bridge finished without an answer');
 }
 
-export async function bridgeHealth(baseUrl: string): Promise<{ ok: boolean; claude: string | null }> {
+/** `aldine`: it is this repo's bridge. Other local bridges (read_paper's, on 8765) answer
+ *  /health too, but ignore the project block and run claude with every tool. */
+export async function bridgeHealth(baseUrl: string): Promise<{ ok: boolean; claude: string | null; aldine: boolean }> {
   const base = (baseUrl.trim() || PROVIDERS['local-bridge'].urlPlaceholder).replace(/\/+$/, '');
   const res = await fetch(`${base}/health`);
   const j = await res.json();
-  return { ok: !!j.ok, claude: j.claude ?? null };
+  return { ok: !!j.ok, claude: j.claude ?? null, aldine: j.service === 'aldine' };
 }
 
-export function streamChat(projectId: string, settings: ChatSettings, history: ChatMessage[], h: StreamHandlers, signal: AbortSignal): Promise<void> {
+export function notAldineBridge(base: string): string {
+  return `The bridge at ${base} is not the Aldine bridge (read_paper's bridge uses port 8765). Start bridge/install.sh from the Aldine repository and set the URL to ${PROVIDERS['local-bridge'].urlPlaceholder} in the chat settings.`;
+}
+
+const verifiedBridges = new Set<string>();
+
+export function streamChat(projectId: string, settings: ChatSettings, history: ChatMessage[], h: StreamHandlers, signal: AbortSignal, activeFile: string | null = null): Promise<void> {
   const s = settings.providers[settings.provider];
   switch (settings.provider) {
     case 'anthropic':
@@ -263,6 +342,6 @@ export function streamChat(projectId: string, settings: ChatSettings, history: C
     case 'local-openai':
       return streamLocalOpenAI(s, history, h, signal);
     case 'local-bridge':
-      return streamLocalBridge(s, history, h, signal);
+      return streamLocalBridge(projectId, s, history, h, signal, activeFile);
   }
 }
