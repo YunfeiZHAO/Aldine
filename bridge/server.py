@@ -8,10 +8,12 @@ streams the result back as NDJSON.
 When the request carries an `aldine` block (the project's MCP URL plus a token the Aldine
 server issued for that one project), claude starts with that MCP server and the Aldine
 plugin's skills loaded for this run only, so it can read, edit and compile the project.
-Nothing is installed or written to Claude Code's config. In that mode claude has no
-shell, file or web tools: document text is untrusted input, and the worst a prompt
-injection can reach is the one project the token is scoped to. Without the block, claude
-runs with no tools at all and only chats.
+Nothing is installed or written to Claude Code's config. Document text is untrusted
+input, so in that mode claude has no file or web tools, and its shell (Bash) runs in
+Claude Code's sandbox: the bridge's own venv first on PATH, a fresh scratch folder per
+run, no network, no reads under the home folder. The worst a prompt injection can reach
+is the one project the token is scoped to. Without the block, claude runs with no tools
+at all and only chats.
 
 Stdlib only; works with the system python3 (3.9+). Binds 127.0.0.1.
 
@@ -30,6 +32,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -38,9 +41,13 @@ HOST = "127.0.0.1"
 PORT = int(os.environ.get("ALDINE_BRIDGE_PORT", "8766"))
 MAX_TOOL_OUTPUT = 8000
 MAX_BODY = 4 * 1024 * 1024
-# An empty working directory, so no project's CLAUDE.md or settings leak into the run.
-WORK_DIR = Path(os.environ.get("ALDINE_BRIDGE_WORKDIR", str(Path.home() / ".aldine-bridge" / "work")))
+BRIDGE_HOME = Path.home() / ".aldine-bridge"
+# Each run gets a fresh, empty folder under this one: no project's CLAUDE.md or settings
+# leak into the run, and one project's scratch files never reach another's run.
+WORK_DIR = Path(os.environ.get("ALDINE_BRIDGE_WORKDIR", str(BRIDGE_HOME / "work")))
+VENV_DIR = Path(os.environ.get("ALDINE_BRIDGE_VENV", str(BRIDGE_HOME / "venv")))
 DEFAULT_ORIGINS = (
+    "https://paper.yunfeizhao.com,"
     "http://localhost:5173,http://127.0.0.1:5173,"
     "http://localhost:3000,http://127.0.0.1:3000,"
     "http://localhost:8080,http://127.0.0.1:8080"
@@ -55,6 +62,162 @@ BLOCKED_TOOLS = [
 ]
 
 PROJECT_ID_RE = re.compile(r"^[a-z0-9]{4,20}$")
+
+# Offered in the chat's model field only when the installed claude cannot report its
+# own list (see claude_models). ALDINE_BRIDGE_MODELS (comma-separated) replaces both.
+FALLBACK_MODELS = [
+    {"id": "", "label": "Default (your Claude Code setting)"},
+    {"id": "opus", "label": "Opus (latest)"},
+    {"id": "sonnet", "label": "Sonnet (latest)"},
+    {"id": "haiku", "label": "Haiku (latest)"},
+    {"id": "fable", "label": "Fable (latest)"},
+    {"id": "claude-opus-5-5", "label": "Claude Opus 5.5"},
+    {"id": "claude-sonnet-5-5", "label": "Claude Sonnet 5.5"},
+    {"id": "claude-haiku-5-5", "label": "Claude Haiku 5.5"},
+    {"id": "claude-fable-5-1", "label": "Claude Fable 5.1"},
+]
+
+
+def shell_enabled() -> bool:
+    return os.environ.get("ALDINE_BRIDGE_SHELL", "1") != "0"
+
+
+def claude_default_model() -> Optional[str]:
+    try:
+        model = json.loads((Path.home() / ".claude" / "settings.json").read_text()).get("model")
+        return model if isinstance(model, str) and model else None
+    except Exception:
+        return None
+
+
+MODELS_TTL_S = 600
+_models_cache: Dict[str, Any] = {"at": 0.0, "models": None}
+
+
+def models_from_init(init: Dict[str, Any]) -> List[Dict[str, str]]:
+    """The chat's options from the `models` of claude's initialize response. Its
+    "default" entry becomes id "" (no --model flag), the chat's own default."""
+    out: List[Dict[str, str]] = []
+    for m in init.get("models") or []:
+        if not isinstance(m, dict) or not isinstance(m.get("value"), str):
+            continue
+        value = m["value"]
+        name = str(m.get("displayName") or value)
+        resolved = m.get("resolvedModel")
+        label = "%s (%s)" % (name, resolved) if isinstance(resolved, str) and resolved and resolved != value else name
+        out.append({"id": "" if value == "default" else value, "label": label,
+                    "description": str(m.get("description") or "")})
+    return out
+
+
+def claude_models(claude_bin: str, timeout: float = 20.0) -> Optional[List[Dict[str, str]]]:
+    """Ask the installed claude which models this login can use: the list its /model
+    menu shows, from the SDK control protocol's initialize handshake. No model is
+    called. None when this claude does not answer it (older CLIs)."""
+    try:
+        proc = subprocess.Popen(
+            [claude_bin, "-p", "--input-format", "stream-json", "--output-format", "stream-json",
+             "--verbose", "--strict-mcp-config", "--tools", ""],
+            cwd=str(BRIDGE_HOME) if BRIDGE_HOME.is_dir() else None,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1,
+        )
+    except Exception:
+        return None
+    found: Dict[str, Any] = {}
+
+    def read() -> None:
+        try:
+            for line in proc.stdout:  # type: ignore[union-attr]
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if event.get("type") == "control_response":
+                    response = event.get("response") or {}
+                    found["init"] = response.get("response") or response
+                    return
+        except Exception:
+            pass
+
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+    try:
+        proc.stdin.write(json.dumps({"type": "control_request", "request_id": "aldine-models",  # type: ignore[union-attr]
+                                     "request": {"subtype": "initialize"}}) + "\n")
+        proc.stdin.flush()  # type: ignore[union-attr]
+        reader.join(timeout)
+    except Exception:
+        pass
+    finally:
+        proc.kill()
+        proc.wait()
+    models = models_from_init(found.get("init") or {})
+    return models or None
+
+
+def available_models() -> Tuple[List[Dict[str, str]], str]:
+    """(options, source): source is "env", "claude-code" or "fallback"."""
+    override = os.environ.get("ALDINE_BRIDGE_MODELS")
+    if override:
+        return ([{"id": "", "label": "Default (your Claude Code setting)"}]
+                + [{"id": m.strip(), "label": m.strip()} for m in override.split(",") if m.strip()]), "env"
+    now = time.time()
+    if _models_cache["models"] is None or now - _models_cache["at"] > MODELS_TTL_S:
+        claude_bin = find_claude()
+        _models_cache["models"] = claude_models(claude_bin) if claude_bin else None
+        _models_cache["at"] = now
+    if _models_cache["models"]:
+        return [dict(m) for m in _models_cache["models"]], "claude-code"
+    models = [dict(m) for m in FALLBACK_MODELS]
+    default = claude_default_model()
+    if default:
+        models[0]["label"] = "Default (%s, your Claude Code setting)" % default
+    return models, "fallback"
+
+
+def venv_base(venv: Path) -> Optional[Path]:
+    """The base Python install a venv links to (pyvenv.cfg `home` is its bin folder)."""
+    try:
+        for line in (venv / "pyvenv.cfg").read_text().splitlines():
+            key, _, value = line.partition("=")
+            if key.strip() == "home" and value.strip():
+                return Path(value.strip()).parent
+    except OSError:
+        pass
+    return None
+
+
+def sandbox_settings(run_dir: Path, venv: Path) -> Dict[str, Any]:
+    """Claude Code settings for this run's Bash: sandboxed, no network, no reads under
+    the home folder except the run's folder and the venv (the MCP token file next to
+    them stays unreadable), writes only in the run's folder (its cwd) and $TMPDIR."""
+    allow_read = [str(run_dir)]
+    if (venv / "bin").is_dir():
+        allow_read.append(str(venv))
+        base = venv_base(venv)
+        if base is not None:
+            allow_read.append(str(base))
+    return {"sandbox": {
+        "enabled": True,
+        "autoAllowBashIfSandboxed": True,
+        "allowUnsandboxedCommands": False,
+        "filesystem": {"denyRead": ["~"], "allowRead": allow_read},
+    }}
+
+
+def run_env(run_dir: Path, venv: Path) -> Dict[str, str]:
+    """Environment for claude and so for its Bash: the venv first on PATH, caches in the
+    run's folder (the sandbox denies writes to ~/.cache and ~/.matplotlib)."""
+    env = os.environ.copy()
+    if (venv / "bin").is_dir():
+        env["VIRTUAL_ENV"] = str(venv)
+        env["PATH"] = str(venv / "bin") + os.pathsep + env.get("PATH", "")
+        env.pop("PYTHONHOME", None)
+    env["MPLCONFIGDIR"] = str(run_dir / ".matplotlib")
+    env["MPLBACKEND"] = "Agg"
+    env["XDG_CACHE_HOME"] = str(run_dir / ".cache")
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    return env
 
 
 def allowed_origins() -> List[str]:
@@ -141,9 +304,9 @@ def mcp_config(aldine: Dict[str, str]) -> Dict[str, Any]:
     }}}
 
 
-def system_prompt(aldine: Dict[str, str]) -> str:
+def system_prompt(aldine: Dict[str, str], shell: bool) -> str:
     opened = ("The user has %s open in the editor. " % aldine["activeFile"]) if aldine["activeFile"] else ""
-    return (
+    prompt = (
         "You are working in Aldine project %s through the mcp__aldine__ tools; pass that id as "
         "`project` when a tool asks for it. %s"
         "Read a file with mcp__aldine__read_file before editing it with mcp__aldine__edit_file, "
@@ -151,23 +314,38 @@ def system_prompt(aldine: Dict[str, str]) -> str:
         "and are committed under your name, so make the change rather than pasting replacement code."
         % (aldine["projectId"], opened)
     )
+    if shell:
+        prompt += (
+            " You also have a sandboxed shell (Bash) in an empty scratch folder, for computing "
+            "things (checking maths with sympy, generating table rows or TikZ/PGF coordinates "
+            "with numpy/pandas). `python` is a venv with numpy, scipy, sympy, pandas, matplotlib, "
+            "Pillow, bibtexparser, PyYAML and tabulate. There is no network (pip install fails) "
+            "and the project's files are not in the folder: read and write them only through "
+            "the mcp__aldine__ tools."
+        )
+    return prompt
 
 
 def build_command(claude_bin: str, model: Optional[str], aldine: Optional[Dict[str, str]],
-                  mcp_config_path: Optional[str], plugin: Optional[Path]) -> List[str]:
+                  mcp_config_path: Optional[str], plugin: Optional[Path],
+                  sandbox: Optional[Dict[str, Any]] = None) -> List[str]:
+    """`sandbox`: settings from sandbox_settings(); given, the run also gets Bash."""
     cmd = [claude_bin, "-p", "--output-format", "stream-json", "--verbose",
            "--strict-mcp-config", "--permission-mode", "dontAsk"]
     if model:
         cmd += ["--model", model]
     if aldine is None:
         return cmd + ["--tools", ""]
+    builtin = ["Skill", "Bash"] if sandbox else ["Skill"]
     cmd += ["--mcp-config", str(mcp_config_path)]
-    cmd += ["--tools", "Skill"]
-    cmd += ["--allowedTools", "mcp__aldine", "Skill"]
+    cmd += ["--tools", ",".join(builtin)]
+    cmd += ["--allowedTools", "mcp__aldine", *builtin]
     cmd += ["--disallowedTools", *BLOCKED_TOOLS]
+    if sandbox:
+        cmd += ["--settings", json.dumps(sandbox)]
     if plugin is not None:
         cmd += ["--plugin-dir", str(plugin)]
-    cmd += ["--append-system-prompt", system_prompt(aldine)]
+    cmd += ["--append-system-prompt", system_prompt(aldine, bool(sandbox))]
     return cmd
 
 
@@ -306,11 +484,25 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Max-Age", "600")
 
     def _refuse_origin(self) -> None:
+        origin = self.headers.get("Origin")
         if not host_allowed(self.headers.get("Host"), PORT):
-            self._send_json(403, {"error": "Call the bridge as http://127.0.0.1:%d or http://localhost:%d." % (PORT, PORT)})
-            return
-        self._send_json(403, {"error": "Origin %s is not allowed. Add it to ALDINE_BRIDGE_ORIGINS and restart the bridge."
-                              % self.headers.get("Origin")})
+            message = "Call the bridge as http://127.0.0.1:%d or http://localhost:%d." % (PORT, PORT)
+        else:
+            message = ("Origin %s is not allowed. Re-run install.sh with ALDINE_BRIDGE_ORIGINS including it "
+                       "(or add it to ALDINE_BRIDGE_ORIGINS and restart server.py)." % origin)
+        sys.stderr.write("[bridge] refused: %s\n" % message)
+        body = json.dumps({"error": message}, ensure_ascii=False).encode("utf-8")
+        self.send_response(403)
+        # The refusing page may read why (and only that): without this header the browser
+        # hides the 403 and the chat can only say the bridge is not running.
+        if origin:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Access-Control-Allow-Private-Network", "true")
+            self.send_header("Vary", "Origin")
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def do_OPTIONS(self) -> None:
         if not self._origin_ok():
@@ -331,11 +523,16 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self) -> None:
-        if self.path.split("?", 1)[0] != "/health":
+        path = self.path.split("?", 1)[0]
+        if path not in ("/health", "/models"):
             self._send_json(404, {"error": "not found"})
             return
         if not self._origin_ok():
             self._refuse_origin()
+            return
+        if path == "/models":
+            models, source = available_models()
+            self._send_json(200, {"models": models, "source": source})
             return
         claude_bin = find_claude()
         plugin = plugin_dir()
@@ -344,6 +541,8 @@ class Handler(BaseHTTPRequestHandler):
             "ok": claude_bin is not None,
             "claude": claude_version(claude_bin) if claude_bin else None,
             "skills": str(plugin) if plugin else None,
+            "shell": shell_enabled(),
+            "venv": str(VENV_DIR) if (VENV_DIR / "bin").is_dir() else None,
         })
 
     def do_POST(self) -> None:
@@ -395,27 +594,33 @@ class Handler(BaseHTTPRequestHandler):
             self._emit({"bridge": "error", "message": "claude CLI not found on this machine. Install Claude Code or set CLAUDE_BIN."})
             return
         WORK_DIR.mkdir(parents=True, exist_ok=True)
+        run_dir = Path(tempfile.mkdtemp(prefix="run-", dir=str(WORK_DIR)))
         config_path: Optional[str] = None
         try:
+            sandbox = None
             if aldine is not None:
-                # A 0600 file, not an argument: argv (and the token in it) is visible in `ps`.
+                # A 0600 file outside the run's folder, not an argument: argv (and the token
+                # in it) is visible in `ps`, and the sandboxed shell cannot read it here.
                 fd, config_path = tempfile.mkstemp(prefix="mcp-", suffix=".json", dir=str(WORK_DIR.parent))
                 with os.fdopen(fd, "w") as f:
                     json.dump(mcp_config(aldine), f)
-            cmd = build_command(claude_bin, model, aldine, config_path, plugin_dir())
-            self._stream(cmd, prompt)
+                if shell_enabled():
+                    sandbox = sandbox_settings(run_dir, VENV_DIR)
+            cmd = build_command(claude_bin, model, aldine, config_path, plugin_dir(), sandbox)
+            self._stream(cmd, prompt, run_dir)
         finally:
             if config_path:
                 try:
                     os.unlink(config_path)
                 except OSError:
                     pass
+            shutil.rmtree(run_dir, ignore_errors=True)
 
-    def _stream(self, cmd: List[str], prompt: str) -> None:
+    def _stream(self, cmd: List[str], prompt: str, run_dir: Path) -> None:
         try:
             proc = subprocess.Popen(
-                cmd, cwd=str(WORK_DIR), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, text=True, bufsize=1,
+                cmd, cwd=str(run_dir), env=run_env(run_dir, VENV_DIR), stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
             )
         except Exception as exc:  # noqa: BLE001
             self._emit({"bridge": "error", "message": "failed to launch claude: %s" % exc})
@@ -473,6 +678,10 @@ def main() -> None:
     plugin = plugin_dir()
     sys.stderr.write("[bridge] claude %s\n" % (("found: " + (claude_version(claude_bin) or claude_bin)) if claude_bin else "NOT FOUND (set CLAUDE_BIN)"))
     sys.stderr.write("[bridge] aldine skills: %s\n" % (plugin or "not found (set ALDINE_PLUGIN_DIR); editing still works"))
+    if not shell_enabled():
+        sys.stderr.write("[bridge] shell: off (ALDINE_BRIDGE_SHELL=0)\n")
+    else:
+        sys.stderr.write("[bridge] shell: sandboxed, venv %s\n" % (VENV_DIR if (VENV_DIR / "bin").is_dir() else "missing (run setup_env.py); system python only"))
     sys.stderr.write("[bridge] allowed origins: %s\n" % ", ".join(allowed_origins()))
     sys.stderr.write("[bridge] listening on http://%s:%d\n" % (HOST, PORT))
     server = ThreadingHTTPServer((HOST, PORT), Handler)

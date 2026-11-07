@@ -5,7 +5,7 @@ import { IconX } from './Icons';
 import { safeStorage } from '../util/safeStorage';
 import {
   ChatContext, ChatMessage, ChatSettings, PROVIDERS, PROVIDER_ORDER,
-  applicableText, bridgeHealth, mergeSettings, splitFences, streamChat,
+  applicableText, BridgeRefused, bridgeHealth, bridgeModels, type ModelOption, mergeSettings, splitFences, streamChat,
 } from '../util/chat';
 
 /** Endpoints, keys and models, this browser only. */
@@ -51,6 +51,7 @@ export default function ChatPanel({ projectId, activeFile, selection, visible, o
   const [showSettings, setShowSettings] = useState(false);
   const [includeSel, setIncludeSel] = useState(true);
   const [bridge, setBridge] = useState<string | null>(null);
+  const [bridgeModelList, setBridgeModelList] = useState<ModelOption[]>([]);
   const abortRef = useRef<AbortController | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -68,6 +69,13 @@ export default function ChatPanel({ projectId, activeFile, selection, visible, o
   useEffect(() => { setIncludeSel(true); }, [selection?.from, selection?.to, activeFile]);
   useEffect(() => { onBusy(busy); }, [busy, onBusy]);
   useEffect(() => () => abortRef.current?.abort(), []);
+  const bridgeUrl = settings.providers['local-bridge'].baseUrl;
+  useEffect(() => {
+    if (provider !== 'local-bridge') return;
+    let live = true;
+    bridgeModels(bridgeUrl).then((list) => { if (live) setBridgeModelList(list); });
+    return () => { live = false; };
+  }, [provider, bridgeUrl, bridge]);
   useEffect(() => {
     const el = listRef.current;
     if (el) el.scrollTop = el.scrollHeight;
@@ -129,8 +137,8 @@ export default function ChatPanel({ projectId, activeFile, selection, visible, o
       setBridge(!h.aldine
         ? `A different bridge answers here (read_paper's?). Use ${PROVIDERS['local-bridge'].urlPlaceholder} and start bridge/install.sh.`
         : h.ok ? `Connected${h.claude ? ` · ${h.claude}` : ''}` : 'The bridge is running but cannot find the claude CLI');
-    } catch {
-      setBridge('Not running');
+    } catch (err) {
+      setBridge(err instanceof BridgeRefused ? err.message : `Not running at ${ps.baseUrl.trim() || PROVIDERS['local-bridge'].urlPlaceholder}`);
     }
   };
 
@@ -162,14 +170,28 @@ export default function ChatPanel({ projectId, activeFile, selection, visible, o
         >
           {PROVIDER_ORDER.map((id) => <option key={id} value={id}>{PROVIDERS[id].label}</option>)}
         </select>
-        <input
-          className="input chat__model"
-          value={ps.model}
-          placeholder={info.modelPlaceholder}
-          aria-label="Model"
-          data-testid="chat-model"
-          onChange={(e) => setProviderField('model', e.target.value)}
-        />
+        {provider === 'local-bridge' && bridgeModelList.length > 0 ? (
+          <select
+            className="input chat__model"
+            value={ps.model.trim()}
+            aria-label="Model"
+            title={bridgeModelList.find((m) => m.id === ps.model.trim())?.description}
+            data-testid="chat-model"
+            onChange={(e) => setProviderField('model', e.target.value)}
+          >
+            {bridgeModelList.map((m) => <option key={m.id} value={m.id} title={m.description}>{m.label}</option>)}
+            {ps.model.trim() && !bridgeModelList.some((m) => m.id === ps.model.trim()) && <option value={ps.model.trim()}>{ps.model.trim()}</option>}
+          </select>
+        ) : (
+          <input
+            className="input chat__model"
+            value={ps.model}
+            placeholder={info.modelPlaceholder}
+            aria-label="Model"
+            data-testid="chat-model"
+            onChange={(e) => setProviderField('model', e.target.value)}
+          />
+        )}
         <button
           className={`btn btn--ghost btn--small${showSettings ? ' chat__toggle--on' : ''}`}
           onClick={() => setShowSettings((v) => !v)}

@@ -53,6 +53,7 @@ class Origins(unittest.TestCase):
         self.assertTrue(server.origin_allowed("https://latex.example.org", allowed))
         self.assertFalse(server.origin_allowed("https://evil.example", allowed))
         self.assertTrue(server.origin_allowed("https://evil.example", ["*"]))
+        self.assertIn("https://paper.yunfeizhao.com", server.DEFAULT_ORIGINS)
 
     def test_host_blocks_rebinding(self):
         self.assertTrue(server.host_allowed("127.0.0.1:8766", 8766))
@@ -82,11 +83,86 @@ class Command(unittest.TestCase):
         self.assertIn("0lazuzaxzv", after(cmd, "--append-system-prompt")[0])
         self.assertNotIn("aldn_abc", " ".join(cmd), "the token never goes on the command line")
 
+    def test_aldine_mode_with_sandboxed_shell(self):
+        block, _ = server.parse_aldine(GOOD)
+        sandbox = server.sandbox_settings(Path("/w/run-1"), Path("/nonexistent-venv"))
+        cmd = server.build_command("claude", None, block, "/tmp/mcp.json", None, sandbox)
+        self.assertEqual(after(cmd, "--tools"), ["Skill,Bash"])
+        self.assertEqual(after(cmd, "--allowedTools"), ["mcp__aldine", "Skill", "Bash"])
+        settings = json.loads(after(cmd, "--settings")[0])["sandbox"]
+        self.assertTrue(settings["enabled"])
+        self.assertFalse(settings["allowUnsandboxedCommands"])
+        self.assertEqual(settings["filesystem"]["denyRead"], ["~"])
+        self.assertEqual(settings["filesystem"]["allowRead"], ["/w/run-1"], "a missing venv adds nothing")
+        self.assertNotIn("network", json.dumps(settings), "no domain is ever allowed")
+        self.assertIn("sandboxed shell", after(cmd, "--append-system-prompt")[0])
+
+    def test_sandbox_reads_the_venv_and_its_base_python(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            venv = Path(d) / "venv"
+            (venv / "bin").mkdir(parents=True)
+            (venv / "pyvenv.cfg").write_text("home = /opt/py/bin\ninclude-system-site-packages = false\n")
+            allow = server.sandbox_settings(Path("/w/run-1"), venv)["sandbox"]["filesystem"]["allowRead"]
+            self.assertEqual(allow, ["/w/run-1", str(venv), "/opt/py"])
+            env = server.run_env(Path("/w/run-1"), venv)
+            self.assertTrue(env["PATH"].startswith(str(venv / "bin")))
+            self.assertEqual(env["VIRTUAL_ENV"], str(venv))
+            self.assertEqual(env["MPLCONFIGDIR"], "/w/run-1/.matplotlib")
+
     def test_mcp_config_carries_token(self):
         block, _ = server.parse_aldine(GOOD)
         cfg = server.mcp_config(block)
         self.assertEqual(cfg["mcpServers"]["aldine"]["headers"]["Authorization"], "Bearer aldn_abc")
         json.dumps(cfg)
+
+
+class Models(unittest.TestCase):
+    INIT = {"models": [
+        {"value": "default", "resolvedModel": "claude-opus-5-5", "displayName": "Default (recommended)", "description": "Use the default model"},
+        {"value": "sonnet", "resolvedModel": "claude-sonnet-5-5", "displayName": "Sonnet", "description": "Sonnet 5.5"},
+        {"value": "my-model", "displayName": "my-model"},
+        {"displayName": "no value, skipped"},
+    ]}
+
+    def test_from_claude_code_init(self):
+        self.assertEqual(server.models_from_init(self.INIT), [
+            {"id": "", "label": "Default (recommended) (claude-opus-5-5)", "description": "Use the default model"},
+            {"id": "sonnet", "label": "Sonnet (claude-sonnet-5-5)", "description": "Sonnet 5.5"},
+            {"id": "my-model", "label": "my-model", "description": ""},
+        ])
+
+    def test_claude_code_list_is_cached_and_preferred(self):
+        server._models_cache.update(at=server.time.time(), models=server.models_from_init(self.INIT))
+        try:
+            models, source = server.available_models()
+            self.assertEqual(source, "claude-code")
+            self.assertEqual([m["id"] for m in models], ["", "sonnet", "my-model"])
+        finally:
+            server._models_cache.update(at=0.0, models=None)
+
+    def test_fallback_when_claude_cannot_say(self):
+        server._models_cache.update(at=server.time.time(), models=None)
+        orig = server.claude_models
+        server.claude_models = lambda *a, **k: None
+        try:
+            server._models_cache["at"] = 0.0
+            models, source = server.available_models()
+            self.assertEqual(source, "fallback")
+            self.assertEqual(models[0]["id"], "")
+        finally:
+            server.claude_models = orig
+            server._models_cache.update(at=0.0, models=None)
+
+    def test_override(self):
+        import os
+        os.environ["ALDINE_BRIDGE_MODELS"] = "opus, my-proxy-model"
+        try:
+            models, source = server.available_models()
+            self.assertEqual(source, "env")
+            self.assertEqual([m["id"] for m in models], ["", "opus", "my-proxy-model"])
+        finally:
+            del os.environ["ALDINE_BRIDGE_MODELS"]
 
 
 class Translator(unittest.TestCase):

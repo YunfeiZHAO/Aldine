@@ -58,6 +58,8 @@ describe('bridge tool progress', () => {
     expect(bridgeToolStatus({ type: 'tool_use', name: 'mcp__aldine__get_pdf_url' })).toBe('Running get pdf url');
     expect(bridgeToolStatus({ type: 'tool_use', name: 'Skill' })).toBe('Using a skill');
     expect(bridgeToolStatus({ type: 'command_execution', name: 'Bash' })).toBe('Running a command');
+    expect(bridgeToolStatus({ type: 'command_execution', name: 'Bash', command: 'python -c "import sympy"' })).toBe('Running python -c "import sympy"');
+    expect(bridgeToolStatus({ type: 'command_execution', name: 'Bash', command: 'x'.repeat(80) })).toBe(`Running ${'x'.repeat(59)}…`);
   });
 });
 

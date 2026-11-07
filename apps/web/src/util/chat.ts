@@ -255,7 +255,10 @@ const TOOL_VERBS: Record<string, string> = {
 /** Progress line for one bridge tool call (`item` of an item.started event). */
 export function bridgeToolStatus(item: { type?: string; name?: string; command?: string }): string {
   if (item.type === 'web_search') return 'Searching the web';
-  if (item.type === 'command_execution') return 'Running a command';
+  if (item.type === 'command_execution') {
+    const cmd = (item.command || '').replace(/\s+/g, ' ').trim();
+    return cmd ? `Running ${cmd.length > 60 ? `${cmd.slice(0, 59)}…` : cmd}` : 'Running a command';
+  }
   const name = item.name || '';
   const aldine = /^mcp__aldine__(.+)$/.exec(name);
   if (!aldine) return name === 'Skill' ? 'Using a skill' : `Running ${name || 'a tool'}`;
@@ -273,7 +276,7 @@ async function streamLocalBridge(projectId: string, s: ProviderSettings, history
   if (!verifiedBridges.has(base)) {
     let health: Awaited<ReturnType<typeof bridgeHealth>>;
     try { health = await bridgeHealth(base); } catch (err) {
-      if (signal.aborted) throw err;
+      if (signal.aborted || err instanceof BridgeRefused) throw err;
       throw new Error(`Could not reach the Claude Code bridge at ${base}. Start it with bridge/install.sh from the Aldine repository, or run python3 bridge/server.py.`);
     }
     if (!health.aldine) throw new Error(notAldineBridge(base));
@@ -323,9 +326,33 @@ async function streamLocalBridge(projectId: string, s: ProviderSettings, history
 export async function bridgeHealth(baseUrl: string): Promise<{ ok: boolean; claude: string | null; aldine: boolean }> {
   const base = (baseUrl.trim() || PROVIDERS['local-bridge'].urlPlaceholder).replace(/\/+$/, '');
   const res = await fetch(`${base}/health`);
-  const j = await res.json();
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok) throw new BridgeRefused(String(j?.error || `The bridge answered HTTP ${res.status}`));
   return { ok: !!j.ok, claude: j.claude ?? null, aldine: j.service === 'aldine' };
 }
+
+export interface ModelOption { id: string; label: string; description?: string }
+
+/** Models the Aldine bridge offers: the list the local Claude Code reports for this login
+ *  (`id` "" = its default). Empty when the bridge is not reachable or predates /models. */
+export async function bridgeModels(baseUrl: string): Promise<ModelOption[]> {
+  const base = (baseUrl.trim() || PROVIDERS['local-bridge'].urlPlaceholder).replace(/\/+$/, '');
+  try {
+    const res = await fetch(`${base}/models`);
+    if (!res.ok) return [];
+    const j = await res.json();
+    return Array.isArray(j?.models)
+      ? j.models.filter((m: any) => typeof m?.id === 'string').map((m: any) => ({
+        id: m.id, label: String(m.label || m.id), ...(typeof m.description === 'string' && m.description ? { description: m.description } : {}),
+      }))
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+/** The bridge is running and said why it refused (e.g. this page's origin is not allowed). */
+export class BridgeRefused extends Error {}
 
 export function notAldineBridge(base: string): string {
   return `The bridge at ${base} is not the Aldine bridge (read_paper's bridge uses port 8765). Start bridge/install.sh from the Aldine repository and set the URL to ${PROVIDERS['local-bridge'].urlPlaceholder} in the chat settings.`;

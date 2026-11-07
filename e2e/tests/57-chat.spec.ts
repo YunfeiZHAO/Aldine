@@ -107,6 +107,7 @@ test.describe('sidebar chat', () => {
       const req = route.request();
       if (req.method() === 'OPTIONS') return route.fulfill({ status: 204, headers: cors });
       if (req.url().endsWith('/health')) return route.fulfill({ headers: cors, json: health });
+      if (req.url().endsWith('/models')) return route.fulfill({ headers: cors, json: { models: [{ id: '', label: 'Default (opus, your Claude Code setting)' }, { id: 'sonnet', label: 'Sonnet (latest)' }, { id: 'claude-opus-5-5', label: 'Claude Opus 5.5' }] } });
       sent.body = req.postDataJSON();
       await route.fulfill({ headers: { ...cors, 'content-type': 'application/x-ndjson' }, body: [...events, { bridge: 'done' }].map((l) => JSON.stringify(l)).join('\n') + '\n' });
     });
@@ -126,6 +127,9 @@ test.describe('sidebar chat', () => {
     await page.getByTestId('chat-settings-toggle').click();
     await page.getByTestId('chat-bridge-check').click();
     await expect(page.getByTestId('chat-bridge-status')).toContainText('Connected · 9.9.9');
+    const model = page.getByTestId('chat-model');
+    await expect(model.locator('option')).toHaveText(['Default (opus, your Claude Code setting)', 'Sonnet (latest)', 'Claude Opus 5.5']);
+    await model.selectOption('sonnet');
     await page.getByTestId('chat-input').fill('Make the fox line livelier');
     await page.getByTestId('chat-send').click();
     await expect(page.getByTestId('chat-answer').last()).toContainText('Bridge edited the fox line');
@@ -133,6 +137,7 @@ test.describe('sidebar chat', () => {
     await expect(page.getByTestId('chat-notice')).toHaveCount(0);
 
     expect(sent.body.prompt).toContain('Make the fox line livelier');
+    expect(sent.body.model).toBe('sonnet');
     expect(sent.body.prompt).not.toContain('Do not modify any files');
     expect(sent.body.aldine.projectId).toBe(id);
     expect(sent.body.aldine.activeFile).toBe('main.tex');
@@ -156,6 +161,22 @@ test.describe('sidebar chat', () => {
     await page.getByTestId('chat-send').click();
     await expect(page.getByTestId('chat-error')).toContainText('is not the Aldine bridge');
     expect(sent.body).toBeNull();
+  });
+
+  test('a bridge that refuses this page\'s origin says so instead of "not running"', async ({ page }) => {
+    await page.route('http://127.0.0.1:8766/**', (route) => route.fulfill({
+      status: 403,
+      headers: { 'access-control-allow-origin': '*' },
+      json: { error: 'Origin http://example.test is not allowed. Re-run install.sh with ALDINE_BRIDGE_ORIGINS including it.' },
+    }));
+    await page.getByTestId('tab-chat').click();
+    await page.getByTestId('chat-provider').selectOption('local-bridge');
+    await page.getByTestId('chat-settings-toggle').click();
+    await page.getByTestId('chat-bridge-check').click();
+    await expect(page.getByTestId('chat-bridge-status')).toContainText('is not allowed');
+    await page.getByTestId('chat-input').fill('Hi bridge');
+    await page.getByTestId('chat-send').click();
+    await expect(page.getByTestId('chat-error')).toContainText('ALDINE_BRIDGE_ORIGINS');
   });
 
   test('without an MCP credential the bridge only chats, and the answer says why', async ({ page }) => {
