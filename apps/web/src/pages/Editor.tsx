@@ -548,7 +548,7 @@ export default function Editor() {
       try {
         const log = await api.log(id, branch);
         // git dates carry second precision — allow slack around the session start
-        const session = log.filter((c) => c.author === 'Claude' && new Date(c.date).getTime() >= startedAt - 10_000);
+        const session = log.filter((c) => c.agent && new Date(c.date).getTime() >= startedAt - 10_000);
         if (!session.length) return;
         bumpHistory();
         const shown = session.slice(0, AGENT_REVIEW_MAX_COMMITS);

@@ -6,7 +6,7 @@ import type { Hocuspocus } from '@hocuspocus/server';
 import * as Y from 'yjs';
 import { branchDir, readMeta } from './store.js';
 import { config } from './config.js';
-import { autosave, ensureWorktree, registerAttributedPaths, pendingAttributionKeys, commitAgentWriteHeld, AGENT_COMMIT_AUTHOR } from './gitops.js';
+import { autosave, ensureWorktree, registerAttributedPaths, pendingAttributionKeys, commitAgentWriteHeld, agentIdentity } from './gitops.js';
 import { safeJoin, debouncePerKey, importPath, isHiddenPath } from './util.js';
 import { replaceFileDurable } from './durable.js';
 import { AUTH_ENABLED, TOKEN_PREFIX, userFromRequest, userFromToken } from './auth.js';
@@ -114,7 +114,7 @@ const AUTOCOMMIT_DEBOUNCE_MS = Number(process.env.ALDINE_AUTOCOMMIT_MS || '') ||
 /** Debounced auto-commit per project::branch after edits settle. One debounce
  *  window with mixed human and agent work must never co-mingle the two into
  *  one wrongly-attributed commit (UX.md: git is the audit ledger;
- *  HistoryPanel/session review key on the author string) — the ordering rule
+ *  HistoryPanel/session review key on the agent flag) — the ordering rule
  *  (attributed paths first under their author + intent, then the anonymous
  *  sweep) lives in gitops.autoCommit, which takes the attribution only while
  *  it holds the repo lock. The attribution lives in gitops, OUTSIDE the
@@ -141,8 +141,8 @@ const scheduleAutoCommit = debouncePerKey<[]>(AUTOCOMMIT_DEBOUNCE_MS, (key) => {
  *  synchronous run as their disk write, after checkpointPathsHeld — the lock
  *  is what keeps an in-flight autosave from staging the write before it is
  *  attributed. */
-export function scheduleCommit(projectId: string, branch: string, message?: string, author?: string, paths?: string[]): void {
-  if (message && author && paths?.length) registerAttributedPaths(projectId, branch, message, author, paths);
+export function scheduleCommit(projectId: string, branch: string, message?: string, author?: string, paths?: string[], committer?: string): void {
+  if (message && author && paths?.length) registerAttributedPaths(projectId, branch, message, author, paths, committer);
   scheduleAutoCommit(`${projectId}::${branch}`);
 }
 
@@ -152,12 +152,12 @@ export function scheduleCommit(projectId: string, branch: string, message?: stri
  * null with `unchanged` when the write left every file as HEAD has it (nothing
  * to commit, nothing pending), null without it when git refused: a refused
  * commit leaves the delta registered for the debounced sweep to retry under
- * Claude's name, so it can never surface as an anonymous autosave. Callers
- * hold the repo lock.
+ * the same identity, so it can never surface as an anonymous autosave. `by`
+ * is the person the agent acts for (the author). Callers hold the repo lock.
  */
-export async function commitAgentWrite(projectId: string, branch: string, files: Array<{ path: string; before: string | Buffer | null; after: string }>, message: string): Promise<{ hash: string | null; unchanged: boolean }> {
+export async function commitAgentWrite(projectId: string, branch: string, files: Array<{ path: string; before: string | Buffer | null; after: string }>, message: string, by?: string): Promise<{ hash: string | null; unchanged: boolean }> {
   try {
-    const res = await commitAgentWriteHeld(projectId, branch, files, message);
+    const res = await commitAgentWriteHeld(projectId, branch, files, message, by);
     if (!res.committed) return { hash: null, unchanged: true };
     noteEdit(projectId, branch, AGENT_EDITOR);
     notifyCommitted(projectId, branch);
@@ -165,7 +165,8 @@ export async function commitAgentWrite(projectId: string, branch: string, files:
   } catch (err) {
     console.warn(`[collab] commit of ${files.map((f) => f.path).join(', ')} failed, left for the autosave: ${(err as Error).message}`);
     noteEdit(projectId, branch, AGENT_EDITOR);
-    scheduleCommit(projectId, branch, message, AGENT_COMMIT_AUTHOR, files.map((f) => f.path));
+    const { author, committer } = agentIdentity(by);
+    scheduleCommit(projectId, branch, message, author, files.map((f) => f.path), committer);
     return { hash: null, unchanged: false };
   }
 }

@@ -564,7 +564,7 @@ export function registerTools(server: McpServer, identity: McpIdentity, ctx: Too
   });
 
   server.registerTool('edit_file', {
-    description: 'Replace exact quoted text inside an existing file — the default way to change a document, and the only safe way to change one a person has open (edits merge with their live typing; write_file would discard it). Each quote: ≥8 characters, copied verbatim from a read, matching exactly one place (or set occurrence). Nothing is applied on any error result. {error:"stale_anchor"}: the quote is not in the file — re-read it, re-anchor from the candidates, retry; at most 2 retries, then tell the user what you tried and ask. {error:"ambiguous_anchor"}: the quote matches several places — the candidates carry the occurrence that picks each; resend with it, no re-read needed. {error:"version_conflict"}: this file changed after the read that base_version came from (writes to other files never conflict, so parallel tools on different files are safe) — re-read this file, then re-apply once. Committed as author Claude before the tool answers, under message (the intent, imperative — "Tighten the abstract"); without one the commit is titled "Edit <path>". The result\'s commit and head are that commit; an edit that leaves the file as it was makes no commit and answers commit:null with unchanged:true (nothing is pending).',
+    description: 'Replace exact quoted text inside an existing file — the default way to change a document, and the only safe way to change one a person has open (edits merge with their live typing; write_file would discard it). Each quote: ≥8 characters, copied verbatim from a read, matching exactly one place (or set occurrence). Nothing is applied on any error result. {error:"stale_anchor"}: the quote is not in the file — re-read it, re-anchor from the candidates, retry; at most 2 retries, then tell the user what you tried and ask. {error:"ambiguous_anchor"}: the quote matches several places — the candidates carry the occurrence that picks each; resend with it, no re-read needed. {error:"version_conflict"}: this file changed after the read that base_version came from (writes to other files never conflict, so parallel tools on different files are safe) — re-read this file, then re-apply once. Committed under the signed-in person\'s name, marked as Claude\'s work, before the tool answers, under message (the intent, imperative — "Tighten the abstract"); without one the commit is titled "Edit <path>". The result\'s commit and head are that commit; an edit that leaves the file as it was makes no commit and answers commit:null with unchanged:true (nothing is pending).',
     inputSchema: {
       project: projectParam,
       branch: branchParam,
@@ -654,7 +654,7 @@ export function registerTools(server: McpServer, identity: McpIdentity, ctx: Too
           firstFrom = Math.min(...res.ranges.map((r) => r.from));
         }
         const after = live !== null ? inFileLineEndings(meta.id, branch, rel, newContent) : newContent;
-        const commit = await commitAgentWrite(meta.id, branch, [{ path: rel, before, after }], cleanCommitMessage(message, `Edit ${rel}`));
+        const commit = await commitAgentWrite(meta.id, branch, [{ path: rel, before, after }], cleanCommitMessage(message, `Edit ${rel}`), identity.user?.name);
         const e = await echo(meta.id, branch);
         return ok({ applied, path: rel, contentVersion: contentVersion(meta.id, branch), fileVersion: fileVersion(meta.id, branch, rel), snippet: snippetAround(newContent, firstFrom), ...commitFields(commit, e.head), ...e });
       });
@@ -662,7 +662,7 @@ export function registerTools(server: McpServer, identity: McpIdentity, ctx: Too
   });
 
   server.registerTool('write_file', {
-    description: 'Create a new file, or replace a whole file. For an existing file prefer edit_file — a whole-file write on an open document teleports collaborators\' viewports and can drop their in-flight typing. Pass base_version (contentVersion from a prior read of this file) to get {error:"version_conflict"} instead of overwriting newer content — only a change to this file conflicts, never one to another file; on conflict re-read and re-write once, then ask. Folders come into being with the first file written inside them. The first .tex written into a project with no main document becomes the main document (newRoot in the result). Committed as author Claude before the tool answers, under message (the intent, imperative); without one the commit is titled "Update <path>". The result\'s commit and head are that commit; content identical to the file makes no commit and answers commit:null with unchanged:true (nothing is pending).',
+    description: 'Create a new file, or replace a whole file. For an existing file prefer edit_file — a whole-file write on an open document teleports collaborators\' viewports and can drop their in-flight typing. Pass base_version (contentVersion from a prior read of this file) to get {error:"version_conflict"} instead of overwriting newer content — only a change to this file conflicts, never one to another file; on conflict re-read and re-write once, then ask. Folders come into being with the first file written inside them. The first .tex written into a project with no main document becomes the main document (newRoot in the result). Committed under the signed-in person\'s name, marked as Claude\'s work, before the tool answers, under message (the intent, imperative); without one the commit is titled "Update <path>". The result\'s commit and head are that commit; content identical to the file makes no commit and answers commit:null with unchanged:true (nothing is pending).',
     inputSchema: {
       project: projectParam,
       branch: branchParam,
@@ -694,7 +694,7 @@ export function registerTools(server: McpServer, identity: McpIdentity, ctx: Too
         store.writeFile(meta.id, branch, rel, content);
         refreshBranchDocsFromDisk(meta.id, branch, [rel]);
         signalAgentWrite(meta.id, branch);
-        const commit = await commitAgentWrite(meta.id, branch, [{ path: rel, before, after: content }], cleanCommitMessage(message, `Update ${rel}`));
+        const commit = await commitAgentWrite(meta.id, branch, [{ path: rel, before, after: content }], cleanCommitMessage(message, `Update ${rel}`), identity.user?.name);
         // Like PUT /file: a rootless project adopts its first .tex here, not
         // only at compile time — wordcount and project_structure answer for a
         // real root right after the write.
@@ -706,7 +706,7 @@ export function registerTools(server: McpServer, identity: McpIdentity, ctx: Too
   });
 
   server.registerTool('batch_write', {
-    description: 'Apply one multi-file change as ONE named commit (author Claude). Each entry carries full content (new files) or quote-anchored edits (existing files, same rules as edit_file). All edits resolve before anything is written — a stale_anchor or ambiguous_anchor writes nothing (the error names the entry as path); fix that entry and resend the whole batch. A version_conflict on any entry also writes nothing: re-read that file and resend. Use it for a coherent change across files; use edit_file for a single file. message = the intent, imperative ("Add related-work section"). The result\'s commit and head are that commit; a batch that leaves every file as it was makes no commit and answers commit:null with unchanged:true (nothing is pending).',
+    description: 'Apply one multi-file change as ONE named commit (author: the signed-in person, committer: Claude). Each entry carries full content (new files) or quote-anchored edits (existing files, same rules as edit_file). All edits resolve before anything is written — a stale_anchor or ambiguous_anchor writes nothing (the error names the entry as path); fix that entry and resend the whole batch. A version_conflict on any entry also writes nothing: re-read that file and resend. Use it for a coherent change across files; use edit_file for a single file. message = the intent, imperative ("Add related-work section"). The result\'s commit and head are that commit; a batch that leaves every file as it was makes no commit and answers commit:null with unchanged:true (nothing is pending).',
     inputSchema: {
       project: projectParam,
       branch: branchParam,
@@ -803,7 +803,7 @@ export function registerTools(server: McpServer, identity: McpIdentity, ctx: Too
         // whole-tree commit would sign them as Claude (and expose them to the
         // session toast's revert). They reach history through the normal
         // autosave debounce instead.
-        const commit = await commitAgentWrite(meta.id, branch, writes.map((w) => ({ path: w.path, before: w.before, after: w.live ? inFileLineEndings(meta.id, branch, w.path, w.next) : w.next })), cleanCommitMessage(message, 'Update files'));
+        const commit = await commitAgentWrite(meta.id, branch, writes.map((w) => ({ path: w.path, before: w.before, after: w.live ? inFileLineEndings(meta.id, branch, w.path, w.next) : w.next })), cleanCommitMessage(message, 'Update files'), identity.user?.name);
         // See write_file: the first .tex of a rootless project becomes the root.
         const firstTex = writes.find((w) => /\.tex$/i.test(w.path))?.path;
         const newRoot = firstTex ? await adoptRootIfUnset(meta.id, branch, firstTex) : undefined;
@@ -945,7 +945,7 @@ export function registerTools(server: McpServer, identity: McpIdentity, ctx: Too
   });
 
   server.registerTool('commit', {
-    description: 'Commit the files you have written on this branch that are not yet committed, as one commit under message (author Claude). Only your own paths land: a collaborator\'s unsaved typing stays out of it and reaches history as their own autosave. Call it when the user asks for a named checkpoint — every write already commits on its own as it lands, so {committed:false} is the normal answer, not a failure: it means they landed already, and the result names the current head and your latest commits on the branch. For a multi-file change you are making right now, use batch_write instead — it writes and commits it in one step under its own message. message titles the commit and replaces the per-file titles those writes would have had.',
+    description: 'Commit the files you have written on this branch that are not yet committed, as one commit under message (author: the signed-in person, committer: Claude). Only your own paths land: a collaborator\'s unsaved typing stays out of it and reaches history as their own autosave. Call it when the user asks for a named checkpoint — every write already commits on its own as it lands, so {committed:false} is the normal answer, not a failure: it means they landed already, and the result names the current head and your latest commits on the branch. For a multi-file change you are making right now, use batch_write instead — it writes and commits it in one step under its own message. message titles the commit and replaces the per-file titles those writes would have had.',
     inputSchema: {
       project: projectParam,
       branch: branchParam,
@@ -967,7 +967,7 @@ export function registerTools(server: McpServer, identity: McpIdentity, ctx: Too
         // the commit that holds them instead of guessing.
         // Short hashes, the length head and commit use everywhere else.
         const recent = res.committed ? [] : (await gitops.log(meta.id, branch, 30))
-          .filter((c) => c.author === gitops.AGENT_COMMIT_AUTHOR).slice(0, 5)
+          .filter((c) => c.agent).slice(0, 5)
           .map((c) => ({ hash: c.hash.slice(0, e.head.length || 7), date: c.date, message: c.message }));
         // "Nothing was waiting", not "everything is committed": after a
         // restart inside the debounce window the ledger is empty while the
@@ -1000,7 +1000,7 @@ export function registerTools(server: McpServer, identity: McpIdentity, ctx: Too
       const meta = await resolveProject(identity, project);
       assertWritableProject(meta.id);
       // A wrong target would splice an @entry into a .tex source, which the
-      // tool would then report as a success (and commit under Claude's name).
+      // tool would then report as a success (and commit as the signed-in person, marked as Claude's work).
       const visible = visiblePath(bibFile || rootSiblingPath(meta.rootFile, 'references.bib'));
       if (!/\.bib$/i.test(visible)) return fail('bibFile must be a .bib file');
       // Branch and path are validated before the budget token is spent and
@@ -1014,7 +1014,7 @@ export function registerTools(server: McpServer, identity: McpIdentity, ctx: Too
         // Right before the write, like every write tool: the tint on the
         // appended entry needs the agent in awareness first, and a lookup
         // that finds nothing or a duplicate must not show Claude in the .bib.
-        added = await addReference(meta.id, branch, query, target, 'Claude', () => markAgentPresence(meta.id, branch, target));
+        added = await addReference(meta.id, branch, query, target, identity.user?.name || gitops.AGENT_COMMIT_AUTHOR, () => markAgentPresence(meta.id, branch, target));
       } catch (err) {
         // references.ts messages name the upstream and its HTTP status — the
         // user can act on them; a bare network failure (undici's TypeError,

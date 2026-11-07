@@ -127,20 +127,22 @@ function ensureOutputExcluded(id: string): void {
  *  next to the commit primitives because a whole-tree commit must consume it
  *  — after commitAll the tree is clean, so a surviving entry would attribute
  *  whatever a human types into those files NEXT to the agent
- *  (HistoryPanel/session review key on the author string, and "Revert these
+ *  (HistoryPanel/session review key on the agent flag, and "Revert these
  *  changes" would undo the human's work). Intents are per path, not per
  *  window: one message for the window would title an earlier edit_file's
  *  checkpoint with a later write's intent, and a reviewer reading History
  *  could not trust the titles. */
-export interface PendingAttributedCommit { projectId: string; branch: string; author: string; paths: Map<string, string> }
+export interface PendingPath { message: string; author: string; committer?: string }
+/** Per path, not per branch: two people's chat edits in one debounce window
+ *  each keep their own author. */
+export interface PendingAttributedCommit { projectId: string; branch: string; paths: Map<string, PendingPath> }
 const pendingAttributed = new Map<string, PendingAttributedCommit>();
 const attributionKey = (id: string, branch: string) => `${id}::${branch}`;
 
-export function registerAttributedPaths(id: string, branch: string, message: string, author: string, paths: string[]): void {
+export function registerAttributedPaths(id: string, branch: string, message: string, author: string, paths: string[], committer?: string): void {
   const key = attributionKey(id, branch);
-  const cur = pendingAttributed.get(key) || { projectId: id, branch, author, paths: new Map<string, string>() };
-  cur.author = author;
-  for (const p of paths) cur.paths.set(p, message); // a re-edit of a pending path carries the newer intent
+  const cur = pendingAttributed.get(key) || { projectId: id, branch, paths: new Map<string, PendingPath>() };
+  for (const p of paths) cur.paths.set(p, { message, author, committer }); // a re-edit of a pending path carries the newer intent
   pendingAttributed.set(key, cur);
 }
 
@@ -162,15 +164,33 @@ export function takeAttributedPaths(id: string, branch: string): PendingAttribut
   return cur;
 }
 
-/** Paths grouped by intent, in first-scheduled order — one commit per group. */
-function byIntent(paths: Map<string, string>): Array<{ message: string; paths: string[] }> {
-  const groups = new Map<string, string[]>();
-  for (const [p, message] of paths) {
-    const g = groups.get(message);
-    if (g) g.push(p); else groups.set(message, [p]);
+export interface AttributedGroup { message: string; author: string; committer?: string; paths: string[] }
+
+/** Paths grouped by intent (and by who they are attributed to), in
+ *  first-scheduled order — one commit per group. `byMessage` false groups by
+ *  person only, for a checkpoint whose one message titles every commit. */
+function attributedGroups(paths: Map<string, PendingPath>, byMessage = true): AttributedGroup[] {
+  const groups = new Map<string, AttributedGroup>();
+  for (const [p, e] of paths) {
+    const k = JSON.stringify([byMessage ? e.message : null, e.author, e.committer ?? null]);
+    const g = groups.get(k);
+    if (g) g.paths.push(p); else groups.set(k, { message: e.message, author: e.author, committer: e.committer, paths: [p] });
   }
-  return [...groups].map(([message, ps]) => ({ message, paths: ps }));
+  return [...groups.values()];
 }
+
+/** Who an agent (MCP) write is credited to. The person the agent acts for is
+ *  the author, so History shows their name; Claude is the committer, which is
+ *  what marks the commit as agent work. Operator mode has no person: Claude is
+ *  both. */
+export function agentIdentity(by?: string): { author: string; committer: string } {
+  return { author: by?.trim() || AGENT_COMMIT_AUTHOR, committer: AGENT_COMMIT_AUTHOR };
+}
+
+/** A commit is agent work when Claude committed it. Commits written before
+ *  the committer split carry Claude as author, and still count. */
+export const isAgentCommit = (author: string, committer: string): boolean =>
+  committer === AGENT_COMMIT_AUTHOR || author === AGENT_COMMIT_AUTHOR;
 
 /**
  * `git commit` as one argv with `--` before the pathspec and the author
@@ -188,8 +208,12 @@ function byIntent(paths: Map<string, string>): Array<{ message: string; paths: s
  */
 const authorEmail = (author: string) => `${author.toLowerCase().replace(/[^a-z0-9]+/g, '.')}@aldine.local`;
 
-async function commitArgv(g: ReturnType<typeof git>, message: string, author: string | undefined, paths?: string[]): Promise<string> {
-  const args = ['--literal-pathspecs', 'commit', '-m', message];
+async function commitArgv(g: ReturnType<typeof git>, message: string, author: string | undefined, paths?: string[], committer?: string): Promise<string> {
+  // Config (-c) before the subcommand: git reads the committer from it, the
+  // author from --author.
+  const args = committer
+    ? ['-c', `user.name=${committer}`, '-c', `user.email=${authorEmail(committer)}`, '--literal-pathspecs', 'commit', '-m', message]
+    : ['--literal-pathspecs', 'commit', '-m', message];
   if (author) args.push(`--author=${author} <${authorEmail(author)}>`);
   if (paths?.length) args.push('--', ...paths);
   await g.raw(args);
@@ -231,7 +255,7 @@ export async function commitAllHeld(id: string, branch: string, message: string,
  * human deleted before the debounce fired) stages NOTHING, which would push
  * every other agent path in the window into the anonymous sweep.
  */
-export async function commitPathsHeld(id: string, branch: string, paths: string[], message: string, author?: string): Promise<{ committed: boolean; hash?: string; files: string[] }> {
+export async function commitPathsHeld(id: string, branch: string, paths: string[], message: string, author?: string, committer?: string): Promise<{ committed: boolean; hash?: string; files: string[] }> {
   if (!paths.length) return { committed: false, files: [] };
   const dir = await ensureWorktree(id, branch);
   const g = git(dir);
@@ -245,7 +269,7 @@ export async function commitPathsHeld(id: string, branch: string, paths: string[
   if (!present.some((p) => staged.has(p))) return { committed: false, files: [] };
   // Committing the explicit pathspec (not the whole index) keeps anything else
   // that happens to be staged out of the attributed commit.
-  const hash = await commitArgv(g, message, author, present);
+  const hash = await commitArgv(g, message, author, present, committer);
   // `present`, not `paths`: a requested path git saw no change in was never
   // staged, so a caller reporting what landed must not name it.
   return { committed: true, hash, files: present };
@@ -289,13 +313,13 @@ export interface FileSnapshot { path: string; content: string | Buffer }
  * is pointed at the committed blobs so status does not read them as staged
  * reversals. An unborn branch (no HEAD) falls back to a working-tree commit.
  */
-export async function commitSnapshotHeld(id: string, branch: string, files: FileSnapshot[], message: string, author?: string): Promise<{ committed: boolean; hash?: string; files: string[] }> {
+export async function commitSnapshotHeld(id: string, branch: string, files: FileSnapshot[], message: string, author?: string, committer?: string): Promise<{ committed: boolean; hash?: string; files: string[] }> {
   if (!files.length) return { committed: false, files: [] };
   const dir = await ensureWorktree(id, branch);
   const head = await gitPlumb(dir, ['rev-parse', '--verify', '--quiet', 'HEAD']).then((h) => h.trim(), () => '');
   if (!head) {
     for (const f of files) { const abs = path.join(dir, f.path); fs.mkdirSync(path.dirname(abs), { recursive: true }); fs.writeFileSync(abs, f.content); }
-    return commitPathsHeld(id, branch, files.map((f) => f.path), message, author);
+    return commitPathsHeld(id, branch, files.map((f) => f.path), message, author, committer);
   }
   // Mode and blob per path as HEAD has them: the mode is kept (a 100755 must
   // not silently become 100644), the blob decides whether anything changed.
@@ -319,7 +343,9 @@ export async function commitSnapshotHeld(id: string, branch: string, files: File
     await gitPlumb(dir, ['read-tree', head], { env });
     for (const s of staged) await gitPlumb(dir, ['update-index', '--add', '--cacheinfo', `${s.mode},${s.blob},${s.path}`], { env });
     const tree = (await gitPlumb(dir, ['write-tree'], { env })).trim();
-    const ident: Record<string, string> = author ? { GIT_AUTHOR_NAME: author, GIT_AUTHOR_EMAIL: authorEmail(author) } : {};
+    const ident: Record<string, string> = {};
+    if (author) Object.assign(ident, { GIT_AUTHOR_NAME: author, GIT_AUTHOR_EMAIL: authorEmail(author) });
+    if (committer) Object.assign(ident, { GIT_COMMITTER_NAME: committer, GIT_COMMITTER_EMAIL: authorEmail(committer) });
     const hash = (await gitPlumb(dir, ['commit-tree', tree, '-p', head, '-m', message], { env: ident })).trim();
     // The worktree's HEAD is the branch ref; the old value guards against a
     // ref that moved underneath (impossible under the repo lock, fatal if not).
@@ -340,15 +366,18 @@ export async function commitSnapshotHeld(id: string, branch: string, files: File
  * write's delta and nothing else, whatever lands on disk meanwhile. `before`
  * null = the file did not exist. Callers hold the repo lock.
  */
-export async function commitWriteHeld(id: string, branch: string, files: Array<{ path: string; before: string | Buffer | null; after: string }>, message: string, author?: string): Promise<{ committed: boolean; hash?: string; files: string[] }> {
+export async function commitWriteHeld(id: string, branch: string, files: Array<{ path: string; before: string | Buffer | null; after: string }>, message: string, author?: string, committer?: string): Promise<{ committed: boolean; hash?: string; files: string[] }> {
   const typed = files.filter((f) => f.before !== null).map((f) => ({ path: f.path, content: f.before as string | Buffer }));
   if (typed.length) await commitSnapshotHeld(id, branch, typed, 'aldine: autosave');
-  return commitSnapshotHeld(id, branch, files.map((f) => ({ path: f.path, content: f.after })), message, author);
+  return commitSnapshotHeld(id, branch, files.map((f) => ({ path: f.path, content: f.after })), message, author, committer);
 }
 
-/** commitWriteHeld under Claude: the commit pair every agent write makes. */
-export function commitAgentWriteHeld(id: string, branch: string, files: Array<{ path: string; before: string | Buffer | null; after: string }>, message: string): Promise<{ committed: boolean; hash?: string; files: string[] }> {
-  return commitWriteHeld(id, branch, files, message, AGENT_COMMIT_AUTHOR);
+/** commitWriteHeld for an agent write: the commit pair every agent write
+ *  makes. `by` is the person the agent acts for (the author); without one
+ *  (operator mode) Claude is the author too. */
+export function commitAgentWriteHeld(id: string, branch: string, files: Array<{ path: string; before: string | Buffer | null; after: string }>, message: string, by?: string): Promise<{ committed: boolean; hash?: string; files: string[] }> {
+  const { author, committer } = agentIdentity(by);
+  return commitWriteHeld(id, branch, files, message, author, committer);
 }
 
 /**
@@ -369,8 +398,8 @@ export async function checkpointPathsHeld(id: string, branch: string, paths: str
   const anonymous = pending ? paths.filter((p) => !pending.paths.has(p)) : paths;
   if (pending && attributed.length) {
     // Under the intent each path was scheduled with, never the incoming write's.
-    for (const g of byIntent(new Map(attributed.map((p) => [p, pending.paths.get(p)!])))) {
-      await commitPathsHeld(id, branch, g.paths, g.message, pending.author);
+    for (const g of attributedGroups(new Map(attributed.map((p) => [p, pending.paths.get(p)!])))) {
+      await commitPathsHeld(id, branch, g.paths, g.message, g.author, g.committer);
     }
     for (const p of attributed) pending.paths.delete(p);
     if (!pending.paths.size) pendingAttributed.delete(key);
@@ -404,14 +433,15 @@ export async function autoCommitHeld(id: string, branch: string, sweepMessage = 
   let last: { committed: boolean; hash?: string } = { committed: false };
   if (attributed) {
     // One commit per intent, so History titles name what each commit holds.
-    const groups = byIntent(attributed.paths);
+    const groups = attributedGroups(attributed.paths);
     for (let i = 0; i < groups.length; i++) {
+      const g = groups[i];
       try {
-        const r = await commitPathsHeld(id, branch, groups[i].paths, groups[i].message, attributed.author);
+        const r = await commitPathsHeld(id, branch, g.paths, g.message, g.author, g.committer);
         if (r.committed) last = { committed: true, hash: r.hash };
       } catch (err) {
-        registerAttributedPaths(id, branch, RETRY_INTENT, attributed.author, groups[i].paths);
-        for (const g of groups.slice(i + 1)) registerAttributedPaths(id, branch, g.message, attributed.author, g.paths);
+        registerAttributedPaths(id, branch, RETRY_INTENT, g.author, g.paths, g.committer);
+        for (const rest of groups.slice(i + 1)) registerAttributedPaths(id, branch, rest.message, rest.author, rest.paths, rest.committer);
         throw err;
       }
     }
@@ -448,11 +478,11 @@ export function autoCommit(id: string, branch: string, sweepMessage = 'aldine: a
  * Commit ONLY the agent work the ledger holds for this branch, as one commit
  * under `message`: the named checkpoint the MCP `commit` tool makes. The
  * caller is stating the intent of the checkpoint, so the per-path intents the
- * individual writes registered are replaced, not grouped — byIntent here would
+ * individual writes registered are replaced, not grouped — attributedGroups here would
  * title the checkpoint with an earlier write's message. Whatever else is dirty
  * stays for the anonymous sweep: a whole-tree commit would sign a
  * collaborator's flushed typing as the agent (HistoryPanel and the session
- * review key on the author string). No pending work is `committed:false`, not
+ * review key on the agent flag). No pending work is `committed:false`, not
  * a failure — the debounce may already have committed it.
  * Held-only on purpose: the caller must hold the lock across its own flush, so
  * a lock-taking wrapper would be dead code and an invitation to nest
@@ -462,18 +492,25 @@ export function autoCommit(id: string, branch: string, sweepMessage = 'aldine: a
 export async function commitAttributedHeld(id: string, branch: string, message: string): Promise<{ committed: boolean; hash?: string; files: string[] }> {
   const pending = takeAttributedPaths(id, branch);
   if (!pending) return { committed: false, files: [] };
-  const paths = [...pending.paths.keys()];
-  try {
-    // The author comes from the ledger, never from the caller: no call site
-    // can sign a commit as somebody else.
-    return await commitPathsHeld(id, branch, paths, message, pending.author);
-  } catch (err) {
-    // Same rule as autoCommitHeld: the subject is the one input the ledger
-    // cannot vouch for, and dropping the attribution would let the next sweep
-    // sign the agent's delta anonymously.
-    registerAttributedPaths(id, branch, RETRY_INTENT, pending.author, paths);
-    throw err;
+  // The authors come from the ledger, never from the caller: no call site can
+  // sign a commit as somebody else. One commit per person the checkpoint holds
+  // work for, each under the checkpoint's message.
+  const groups = attributedGroups(pending.paths, false);
+  const done = { committed: false, hash: undefined as string | undefined, files: [] as string[] };
+  for (let i = 0; i < groups.length; i++) {
+    const g = groups[i];
+    try {
+      const r = await commitPathsHeld(id, branch, g.paths, message, g.author, g.committer);
+      if (r.committed) Object.assign(done, { committed: true, hash: r.hash, files: [...done.files, ...r.files] });
+    } catch (err) {
+      // Same rule as autoCommitHeld: the subject is the one input the ledger
+      // cannot vouch for, and dropping the attribution would let the next sweep
+      // sign the agent's delta anonymously.
+      for (const rest of groups.slice(i)) registerAttributedPaths(id, branch, RETRY_INTENT, rest.author, rest.paths, rest.committer);
+      throw err;
+    }
   }
+  return done;
 }
 
 /** Short HEAD of a branch — the `{branch, head}` echo every MCP tool result
@@ -483,23 +520,26 @@ export async function branchShortHead(id: string, branch: string): Promise<strin
   try { return (await git(repoDir(id)).revparse(['--short', branch])).trim(); } catch { return ''; }
 }
 
-export interface LogEntry { hash: string; date: string; message: string; author: string }
+/** `author` is the person a commit is credited to; `agent` marks Claude's
+ *  work (a chat or MCP write), which History shows with its own dot. */
+export interface LogEntry { hash: string; date: string; message: string; author: string; agent: boolean }
 
 /** Fields are split on NUL, the one byte no git field can hold: a commit
  *  subject may carry any other byte, including the control characters a
  *  parser might pick as markers, and simple-git's default parser splits on a
  *  printable one, letting a message move itself into the author field — the
- *  field the History panel and the session review key on. %an, not %aN: a
- *  .mailmap committed into the project would otherwise rename authors. */
+ *  field the History panel keys on. %an and %cn, not %aN: a .mailmap
+ *  committed into the project would otherwise rename authors. */
 export async function log(id: string, branch: string, limit = 50): Promise<LogEntry[]> {
   if (!BRANCH_RE.test(branch) || branch.includes('..')) throw new Error('bad branch name');
-  const raw = await git(repoDir(id)).raw(['log', branch, `--max-count=${limit}`, '--format=%H%x00%aI%x00%an%x00%s%x00', '--']);
+  const raw = await git(repoDir(id)).raw(['log', branch, `--max-count=${limit}`, '--format=%H%x00%aI%x00%an%x00%cn%x00%s%x00', '--']);
   const f = raw.split('\0');
   const out: LogEntry[] = [];
-  for (let i = 0; i + 3 < f.length; i += 4) {
+  for (let i = 0; i + 4 < f.length; i += 5) {
     const hash = f[i].trim(); // the newline git prints after each record leads the next hash
     if (!/^[0-9a-f]{40}$/.test(hash)) continue;
-    out.push({ hash, date: f[i + 1], author: f[i + 2], message: f[i + 3] });
+    const author = f[i + 2];
+    out.push({ hash, date: f[i + 1], author, message: f[i + 4], agent: isAgentCommit(author, f[i + 3]) });
   }
   return out;
 }
@@ -513,8 +553,9 @@ export async function branchHead(id: string, branch: string): Promise<string> {
   } catch { return ''; }
 }
 
-/** Author string every agent write commits under; the History dot, the
- *  session review and this answer all key on it. */
+/** Name Claude commits under, as committer. The History dot, the session
+ *  review and the revert metric key on it (isAgentCommit). Also the author of
+ *  operator-mode writes, which have no person to credit. */
 export const AGENT_COMMIT_AUTHOR = 'Claude';
 /** Commits walked per answer. Past this the counts are a floor
  *  (`truncated`), which is the honest reading of "Claude wrote 300 commits". */
@@ -562,7 +603,7 @@ export async function agentActivitySince(id: string, branch: string, mark: { hea
   // committed .mailmap must not be able to rename the agent.
   const args = ['log', usable ? `${mark!.head}..${branch}` : branch,
                 `--max-count=${AGENT_SCAN_LIMIT}`,
-                '--format=%x00%H%x00%aI%x00%an%x00%s', '--name-only'];
+                '--format=%x00%H%x00%aI%x00%an%x00%cn%x00%s', '--name-only'];
   if (!usable && mark?.at) {
     const t = Date.parse(mark.at);
     if (!Number.isNaN(t)) args.push(`--since=${new Date(t - 1000).toISOString()}`);
@@ -575,12 +616,12 @@ export async function agentActivitySince(id: string, branch: string, mark: { hea
   const commits: AgentCommit[] = [];
   let records = 0;
   let commitCount = 0;
-  for (let i = 1; i + 3 < f.length; i += 4) {
+  for (let i = 1; i + 4 < f.length; i += 5) {
     const hash = f[i].trim();
     if (!/^[0-9a-f]{40}$/.test(hash)) continue;
     records++;
-    const [date, author, rest] = [f[i + 1], f[i + 2], f[i + 3]];
-    if (author !== AGENT_COMMIT_AUTHOR) continue;
+    const [date, author, committer, rest] = [f[i + 1], f[i + 2], f[i + 3], f[i + 4]];
+    if (!isAgentCommit(author, committer)) continue;
     const lines = rest.split('\n');
     const message = lines[0] ?? '';
     const touched = lines.slice(1).map((l) => l.trim()).filter(Boolean);
@@ -655,13 +696,16 @@ export async function revertCommits(id: string, branch: string, hashes: string[]
   });
 }
 
-/** Author name of each commit, in the order given (a hash that does not
- *  resolve is skipped). Used to tell a revert of Claude's work from one of a
- *  human's, which the revert route reports as a success metric. */
-export async function commitAuthors(id: string, hashes: string[]): Promise<string[]> {
+/** Whether each commit, in the order given, is Claude's work. Used to tell a
+ *  revert of Claude's work from one of a human's, which the revert route
+ *  reports as a success metric. */
+export async function commitIsAgent(id: string, hashes: string[]): Promise<boolean[]> {
   if (!hashes.length || hashes.some((h) => !/^[0-9a-f]{4,40}$/.test(h))) throw new Error('bad commit hash');
-  const raw = await git(repoDir(id)).raw(['show', '-s', '--format=%an', ...hashes]).catch(() => '');
-  return raw.split('\n').map((l) => l.trim()).filter(Boolean);
+  const raw = await git(repoDir(id)).raw(['show', '-s', '--format=%an%x00%cn', ...hashes]).catch(() => '');
+  return raw.split('\n').filter((l) => l.trim()).map((l) => {
+    const [author = '', committer = ''] = l.split('\0');
+    return isAgentCommit(author.trim(), committer.trim());
+  });
 }
 
 /** Unified patch for a single commit (handles root commits, which have no parent). */

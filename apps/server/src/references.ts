@@ -413,7 +413,7 @@ export async function addReference(projectId: string, branch: string, query: str
     await checkpointPathsHeld(projectId, branch, [bibFile]);
     flushBranchDocs(projectId, branch);
     const { key, duplicate, created, before, after } = append();
-    if (!duplicate) await commitAgentWrite(projectId, branch, [{ path: bibFile, before, after }], `Add reference ${key || bibFile}`);
+    if (!duplicate) await commitAgentWrite(projectId, branch, [{ path: bibFile, before, after }], `Add reference ${key || bibFile}`, author);
     return { key, bibFile, duplicate, created };
   });
 }

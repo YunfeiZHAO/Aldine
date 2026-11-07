@@ -140,7 +140,8 @@ export interface CompileStatus {
   agent: boolean;
 }
 export interface BibEntry { key: string; type: string; author?: string; authorLabel?: string; title?: string; year?: string; journal?: string; file: string }
-export interface LogEntry { hash: string; date: string; message: string; author: string }
+/** `author` is the person a commit is credited to; `agent` marks Claude's work. */
+export interface LogEntry { hash: string; date: string; message: string; author: string; agent: boolean }
 /** Claude's commits on a branch past the caller's review mark. `commitCount`
  *  and `fileCount` are a floor when `truncated`; `commits` is capped. */
 export interface AgentActivity {

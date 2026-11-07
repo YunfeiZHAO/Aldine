@@ -1873,7 +1873,7 @@ h1{font-size:1.1rem;margin:0 0 .5rem}p{margin:0 0 1.25rem;color:var(--muted);ove
           noteEdit(req.params.id, branch, editorOf(reqUser(req)));
           // Success-metric line (docs/plans/agent-api/00-overview.md, "% of
           // agent commits reverted"): only reverts that undo Claude's work.
-          const agentCommits = (await gitops.commitAuthors(req.params.id, hashes).catch(() => [])).filter((a) => a === gitops.AGENT_COMMIT_AUTHOR).length;
+          const agentCommits = (await gitops.commitIsAgent(req.params.id, hashes).catch(() => [])).filter(Boolean).length;
           if (agentCommits) console.log(`[metric] agent_revert user=${reqUser(req)?.id ?? 'operator'} project=${req.params.id} commits=${agentCommits}`);
         }
         return { ...result, author: author ?? null };
