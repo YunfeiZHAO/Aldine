@@ -30,13 +30,14 @@ import { config } from './config.js';
 import { detectEngine, decodeText } from './detect.js';
 import { multipartBoundary, parseMultipart } from './multipart.js';
 import { aiAutoFix, aiConfigured, aiModel, diagnose } from './ai.js';
+import { ChatInputError, CHAT_TIMEOUT_MS, checkedEndpoint, parseChatRequest, streamChat } from './aichat.js';
 import * as comments from './comments.js';
 import * as auth from './auth.js';
 import * as oauth from './oauth.js';
 import * as email from './email.js';
 import { canAccess, isAdmin, isMember, isOwner, listingAccess, ownerName, type ListAccess } from './authz.js';
 import { noteActivity, registerAdminRoutes } from './admin.js';
-import { loginLimiter, registerLimiter, signInBackoff, confirmResendLimiter, aiLimiter, refLimiter, visitLimiter, compileGate, compileLimiter, searchLimiter, replaceLimiter, copyLimiter, inviteLimiter, shareLimiter, shareBurst, clientKey } from './ratelimit.js';
+import { loginLimiter, registerLimiter, signInBackoff, confirmResendLimiter, aiLimiter, chatLimiter, refLimiter, visitLimiter, compileGate, compileLimiter, searchLimiter, replaceLimiter, copyLimiter, inviteLimiter, shareLimiter, shareBurst, clientKey } from './ratelimit.js';
 import { invitationMail, newInvitationId, inviteExpiry, stateOf, recipientKeys, isOrcidId, isEmailAddress, normalizeEntry, INVITE_ID_RE, type InviteReport } from './invites.js';
 import { searchProject, replaceInProject, SearchError, type ReplaceBody } from './search.js';
 import { safeJoin, isTextFile, rawFileType, RAW_FILE_CSP, importPath, isHiddenPath, optionLikePath, cleanCommitMessage, overlongPath, pathConflict, seedError, newId, rootSiblingPath, BRANCH_RE, PROJECT_ID_RE, invalidRootFile, publicBase } from './util.js';
@@ -2660,6 +2661,37 @@ h1{font-size:1.1rem;margin:0 0 .5rem}p{margin:0 0 1.25rem;color:var(--muted);ove
         return reply.code(502).send({ error: `AI request failed: ${err.message}` });
       }
     });
+
+  // ---------- sidebar chat (bring-your-own endpoint and key, per request) ----------
+  // Project-scoped so the shared guard demands access to the project whose
+  // text is being sent. Answers stream as NDJSON: {delta} lines, then {done}
+  // or {error}. Errors before the stream starts are plain JSON with a status.
+  app.post<{ Params: { id: string }; Body: any }>('/api/projects/:id/ai/chat', async (req, reply) => {
+    if (!(await chatLimiter.take(clientKey(req, reqUser(req)?.id)))) return reply.code(429).send({ error: 'Chat rate limit reached — please slow down' });
+    let chat; let url: URL;
+    try {
+      chat = parseChatRequest(req.body);
+      url = await checkedEndpoint(chat);
+    } catch (err: any) {
+      if (err instanceof ChatInputError) return reply.code(400).send({ error: err.message });
+      throw err;
+    }
+    reply.hijack();
+    const raw = reply.raw;
+    raw.writeHead(200, { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-store', 'x-accel-buffering': 'no' });
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(new Error('The answer took too long and was stopped')), CHAT_TIMEOUT_MS);
+    raw.on('close', () => { if (!raw.writableFinished) ac.abort(); });
+    try {
+      for await (const delta of streamChat(chat, url, ac.signal)) raw.write(JSON.stringify({ delta }) + '\n');
+      raw.write('{"done":true}\n');
+    } catch (err: any) {
+      if (!raw.destroyed) raw.write(JSON.stringify({ error: String((ac.signal.reason as Error | undefined)?.message || err?.message || err) }) + '\n');
+    } finally {
+      clearTimeout(timer);
+      if (!raw.destroyed) raw.end();
+    }
+  });
 
   // ---------- plugins ----------
   app.get('/api/plugins', async () => listPlugins());

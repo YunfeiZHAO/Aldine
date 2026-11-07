@@ -36,6 +36,23 @@ const server = http.createServer((req, res) => {
     let raw = '';
     req.on('data', (d) => { raw += d; });
     req.on('end', () => {
+      // Sidebar chat (stream: true): an SSE answer that quotes back whether
+      // the selection arrived, split across events like the real API.
+      let body = {};
+      try { body = JSON.parse(raw); } catch { /* not JSON */ }
+      if (body.stream) {
+        if (req.headers['x-api-key'] !== 'chat-key') return send(401, { type: 'error', error: { type: 'authentication_error', message: 'invalid x-api-key' } });
+        const last = body.messages?.[body.messages.length - 1]?.content || '';
+        const saw = last.includes('Selected text from main.tex') && last.includes('quick brown fox');
+        const text = `${saw ? 'Saw the selection.' : 'No selection.'} Try:\n\`\`\`latex\nA swift auburn fox leaps over the idle hound.\n\`\`\``;
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.write('event: message_start\ndata: {"type":"message_start","message":{"id":"msg_chat"}}\n\n');
+        for (const piece of [text.slice(0, 10), text.slice(10)]) {
+          res.write(`event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: piece } })}\n\n`);
+        }
+        res.end('event: message_stop\ndata: {"type":"message_stop"}\n\n');
+        return;
+      }
       const jsonText = JSON.stringify({
         explanation: 'The command \\thisisnotacommand is not defined. Removing it fixes the compile.',
         fixes: [{ file: 'main.tex', find: '\\thisisnotacommand', replace: '', note: 'remove undefined command' }],

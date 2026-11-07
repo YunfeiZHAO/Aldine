@@ -76,6 +76,9 @@ export interface CodePaneHandle {
   insertAtCursor(text: string): void;
   currentLine(): number | null;
   getSelection(): { from: number; to: number; quote: string } | null;
+  /** Replace from..to with `text` only while that range still reads `expected`
+   *  (re-anchored by `expected` when edits moved it). False when it no longer does. */
+  replaceRange(from: number, to: number, expected: string, text: string): boolean;
   setCommentRanges(ranges: CommentRange[]): void;
   revealPos(pos: number): void;
   format(action: 'bold' | 'italic' | 'list' | { section: 1 | 2 | 3 | 4 }): void;
@@ -130,6 +133,8 @@ const flashField = StateField.define<DecorationSet>({
   provide: (f) => EditorView.decorations.from(f),
 });
 
+export interface PaneSelection { from: number; to: number; text: string; fromLine: number; toLine: number }
+
 interface Props {
   projectId: string;
   branch: string;
@@ -140,6 +145,8 @@ interface Props {
   /** Fires on every doc change; `local` is false for applied remote updates. */
   onDocChanged?(local: boolean): void;
   onStats?(stats: { words: number; selWords: number | null }): void;
+  /** The main selection after it settles; null when it is empty. */
+  onSelection?(sel: PaneSelection | null): void;
   spellcheck?: boolean;
   /** Vim keybindings (this browser's choice). */
   vim?: boolean;
@@ -210,11 +217,11 @@ function spellcheckAttrs(spellcheck: boolean, filePath: string) {
   });
 }
 
-const CodePane = forwardRef<CodePaneHandle, Props>(function CodePane({ projectId, branch, filePath, rootFile, onUsers, onDocChanged, onStats, spellcheck = false, vim = false, onWrite, mode = 'source', identity }, ref) {
+const CodePane = forwardRef<CodePaneHandle, Props>(function CodePane({ projectId, branch, filePath, rootFile, onUsers, onDocChanged, onStats, onSelection, spellcheck = false, vim = false, onWrite, mode = 'source', identity }, ref) {
   const hostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
-  const cbRef = useRef({ onDocChanged, onStats, onWrite });
-  cbRef.current = { onDocChanged, onStats, onWrite };
+  const cbRef = useRef({ onDocChanged, onStats, onWrite, onSelection });
+  cbRef.current = { onDocChanged, onStats, onWrite, onSelection };
   const toast = useToast();
   const toastRef = useRef(toast);
   toastRef.current = toast;
@@ -282,6 +289,28 @@ const CodePane = forwardRef<CodePaneHandle, Props>(function CodePane({ projectId
       if (sel.empty) return null;
       return { from: sel.from, to: sel.to, quote: view.state.sliceDoc(sel.from, sel.to) };
     },
+    replaceRange(from, to, expected, text) {
+      const view = viewRef.current;
+      if (!view) return false;
+      const doc = view.state.doc;
+      let at = -1;
+      if (to <= doc.length && doc.sliceString(from, to) === expected) at = from;
+      else if (expected) {
+        // The range moved: take the occurrence of `expected` nearest the old start.
+        const src = doc.toString();
+        for (let i = src.indexOf(expected); i >= 0; i = src.indexOf(expected, i + 1)) {
+          if (at < 0 || Math.abs(i - from) < Math.abs(at - from)) at = i;
+        }
+      }
+      if (at < 0) return false;
+      view.dispatch({
+        changes: { from: at, to: at + expected.length, insert: text },
+        selection: { anchor: at, head: at + text.length },
+        effects: EditorView.scrollIntoView(at, { y: 'center' }),
+      });
+      view.focus();
+      return true;
+    },
     setCommentRanges(ranges) {
       lastCommentRanges.current = ranges; // remember for a re-apply once the doc syncs
       const view = viewRef.current;
@@ -320,6 +349,7 @@ const CodePane = forwardRef<CodePaneHandle, Props>(function CodePane({ projectId
   useEffect(() => {
     if (!hostRef.current) return;
     let statsTimer: ReturnType<typeof setTimeout> | null = null;
+    let selTimer: ReturnType<typeof setTimeout> | null = null;
     warmBib(projectId, branch); // so \cite hover tooltips have data immediately
     const docName = `${projectId}::${branch}::${filePath}`;
     const ydoc = new Y.Doc();
@@ -412,6 +442,21 @@ const CodePane = forwardRef<CodePaneHandle, Props>(function CodePane({ projectId
             { key: 'Mod-i', run: toggleStyle('italic') },
           ]),
           EditorView.updateListener.of((u) => {
+            if ((u.docChanged || u.selectionSet) && cbRef.current.onSelection) {
+              if (selTimer) clearTimeout(selTimer);
+              selTimer = setTimeout(() => {
+                const state = viewRef.current?.state;
+                if (!state) return;
+                const sel = state.selection.main;
+                cbRef.current.onSelection?.(sel.empty ? null : {
+                  from: sel.from,
+                  to: sel.to,
+                  text: state.sliceDoc(sel.from, sel.to),
+                  fromLine: state.doc.lineAt(sel.from).number,
+                  toLine: state.doc.lineAt(sel.to).number,
+                });
+              }, 120);
+            }
             if (u.docChanged || u.selectionSet) {
               if (statsTimer) clearTimeout(statsTimer);
               statsTimer = setTimeout(() => {
@@ -466,6 +511,7 @@ const CodePane = forwardRef<CodePaneHandle, Props>(function CodePane({ projectId
 
     return () => {
       if (statsTimer) clearTimeout(statsTimer);
+      if (selTimer) clearTimeout(selTimer);
       if (flashTimer.current) { clearTimeout(flashTimer.current); flashTimer.current = null; }
       pendingGoto.current = null;
       ytext.unobserve(onYChange);

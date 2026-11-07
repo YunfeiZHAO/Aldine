@@ -8,7 +8,8 @@ import { useAuth } from '../components/Auth';
 import ShareModal from '../components/ShareModal';
 import About from '../components/About';
 import FileTree, { stemEnd } from '../components/FileTree';
-import CodePane, { CodePaneHandle, EditorMode } from '../components/CodePane';
+import CodePane, { CodePaneHandle, EditorMode, PaneSelection } from '../components/CodePane';
+import ChatPanel from '../components/ChatPanel';
 import { setVisualFiles } from '../editor/visual/context';
 import PdfPane, { PdfPaneHandle } from '../components/PdfPane';
 import FilePreview from '../components/FilePreview';
@@ -22,7 +23,7 @@ import SearchPanel, { SearchFocus } from '../components/SearchPanel';
 import Presence, { PresenceUser } from '../components/Presence';
 import { PluginHost, PluginPanel } from '../plugins/host';
 import { hintFor } from '../editor/errorHints';
-import { IconChevronLeft, IconChevronRight, IconSearch, IconSidebar } from '../components/Icons';
+import { IconChat, IconChevronLeft, IconChevronRight, IconSearch, IconSidebar } from '../components/Icons';
 import ReadPaperUploadButton from '../components/ReadPaperUpload';
 import CommandPalette, { Command, PaletteTrigger } from '../components/CommandPalette';
 import ConnectClaudeModal from '../components/ClaudeConnect';
@@ -67,6 +68,8 @@ const SIDEBAR_WIDTH = 'aldine.sidebarWidth';
 const SIDEBAR_DEFAULT = 230;
 const SIDEBAR_MIN = 180;
 const SIDEBAR_MAX = 520;
+/** The width Chat opens the sidebar to when nobody has dragged it yet. */
+const SIDEBAR_CHAT = 360;
 /** What the two dividers always leave the code editor between them. */
 const EDITOR_MIN = 270;
 /** The room the preview leaves for the sidebar: its width, and never less than
@@ -107,6 +110,8 @@ export default function Editor() {
   const [newFileRequest, setNewFileRequest] = useState(0);
   const [activeFile, setActiveFile] = useState<string | null>(null);
   const [tab, setTab] = useState<'files' | 'history' | string>('files');
+  const [selection, setSelection] = useState<PaneSelection | null>(null);
+  const [chatBusy, setChatBusy] = useState(false);
   const [compile, setCompile] = useState<{ status: CompileStatus; result: CompileResult | null; wallMs?: number }>({ status: 'idle', result: null });
   const [pdfWidth, setPdfWidth] = useState(() => Math.max(360, Math.round(window.innerWidth * 0.4)));
   const [sidebarWidth, setSidebarWidth] = useState(() => {
@@ -860,6 +865,13 @@ export default function Editor() {
   // ---- project search ----
   /** The Search tab, with its query (or replace) field focused and selected;
    *  a one-line selection in the editor becomes the query. */
+  const openChat = () => {
+    setTab('chat');
+    setSidebar(false);
+    if (!safeStorage.get(SIDEBAR_WIDTH) && sidebarWidth < SIDEBAR_CHAT) resizeSidebar(Math.min(SIDEBAR_CHAT, Math.max(sidebarWidth, sidebarMax)), true);
+  };
+  useEffect(() => { setSelection(null); }, [activeFile, branch]);
+
   const openSearch = useCallback((seed?: string, field: SearchFocus['field'] = 'query') => {
     setTab('search');
     setSidebar(false);
@@ -1046,6 +1058,7 @@ export default function Editor() {
       { id: 'settings', group: 'View', title: 'Project settings: compiler, main document, TeX Live', run: () => setSettingsOpen(true) },
       { id: 'shortcuts', group: 'View', title: 'Change keyboard shortcuts…', run: () => setSettingsOpen('shortcuts') },
       { id: 'sidebar', group: 'View', title: sidebarHidden ? 'Show the sidebar' : 'Hide the sidebar', run: () => setSidebar(!sidebarHidden) },
+      { id: 'chat', group: 'View', title: 'Open the chat', run: openChat },
       { id: 'download-zip', group: 'Project', title: `Download the project source as ZIP (${branch})`, run: () => { window.location.assign(api.archiveUrl(id, branch)); } },
       { id: 'share', group: 'Project', title: 'Share or download the PDF…', run: () => setShareOpen(true) },
       { id: 'about', group: 'View', title: 'About Aldine and its source code', run: () => setAboutOpen(true) },
@@ -1260,6 +1273,17 @@ export default function Editor() {
             <button className={`sidebar__tab ${tab === 'review' ? 'sidebar__tab--active' : ''}`} onClick={() => setTab('review')} role="tab" aria-selected={tab === 'review'} data-testid="tab-review">
               Review{comments.some((c) => !c.resolved) ? ` (${comments.filter((c) => !c.resolved).length})` : ''}
             </button>
+            <button
+              className={`sidebar__tab sidebar__tab--icon sidebar__tab--chat ${tab === 'chat' ? 'sidebar__tab--active' : ''}`}
+              onClick={openChat}
+              role="tab"
+              aria-selected={tab === 'chat'}
+              aria-label={chatBusy && tab !== 'chat' ? 'Chat (answering)' : 'Chat'}
+              title="Chat about the selected text"
+              data-testid="tab-chat"
+            >
+              <IconChat />{chatBusy && tab !== 'chat' && <span className="sidebar__tab-dot" data-testid="tab-chat-busy" />}
+            </button>
             {(() => {
               const more = [{ id: 'history', title: 'History' }, ...pluginPanels.filter((p) => !PINNED_PANELS.includes(p.id))];
               const shown = more.find((p) => p.id === tab);
@@ -1369,6 +1393,19 @@ export default function Editor() {
                 onReplaced={onReplaced}
               />
             </div>
+            {/* Always mounted: an answer keeps streaming while another tab is open. */}
+            <div className="sidebar__panel sidebar__panel--fill" style={{ display: tab === 'chat' ? 'flex' : 'none' }}>
+              <ChatPanel
+                key={id}
+                projectId={id}
+                activeFile={activeFile}
+                selection={selection}
+                visible={tab === 'chat' && !sidebarHidden}
+                onBusy={setChatBusy}
+                insertAtCursor={(text) => codeRef.current?.insertAtCursor(text)}
+                replaceRange={(ctx, text) => codeRef.current?.replaceRange(ctx.from, ctx.to, ctx.text, text) ?? false}
+              />
+            </div>
             {pluginPanels.map((p) => (
               <div key={p.id} className="sidebar__panel" style={{ display: tab === p.id ? 'block' : 'none' }} ref={(el) => { if (el && !el.hasChildNodes()) p.mount(el); }} />
             ))}
@@ -1408,6 +1445,7 @@ export default function Editor() {
                 onUsers={setUsers}
                 onDocChanged={onDocChanged}
                 onStats={setStats}
+                onSelection={setSelection}
                 spellcheck={spellcheck}
                 vim={vim}
                 onWrite={doCompile}

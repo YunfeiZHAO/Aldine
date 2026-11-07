@@ -163,6 +163,8 @@ export const confirmResendLimiter = new RateLimiter('confirm-resend', 3, 1 / 600
 export const registerLimiter = new RateLimiter('register', n(process.env.RL_REGISTER_BURST, 5), 1 / 300);
 /** AI fix: 20 burst, refill 1 / 12s (≈5/min sustained) — bounds LLM spend per client. */
 export const aiLimiter = new RateLimiter('ai', n(process.env.RL_AI_BURST, 20), n(process.env.RL_AI_REFILL_PER_MIN, 5) / 60);
+/** Sidebar chat: 30 burst, refill 1 / 3s (20/min) — the person's own key pays, so this only bounds proxy load. */
+export const chatLimiter = new RateLimiter('chat', n(process.env.RL_CHAT_BURST, 30), n(process.env.RL_CHAT_REFILL_PER_MIN, 20) / 60);
 /** reference lookups (DOI/OpenAlex): 30 burst, 1/2s. */
 export const refLimiter = new RateLimiter('ref', n(process.env.RL_REF_BURST, 30), 0.5);
 /** at most 2 concurrent compiles per client (per node). */
